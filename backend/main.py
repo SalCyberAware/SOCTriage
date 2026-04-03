@@ -32,10 +32,4 @@ def health():
         "service": "SOC Triage Assistant",
         "version": "1.0.0"
     }
-```
 
----
-
-**COMMIT MESSAGE:**
-```
-Update main.py — register triage routes and lock CORS to frontend URL
