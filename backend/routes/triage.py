@@ -136,10 +136,4 @@ def close(case_id: str, body: CloseCase):
 def dashboard():
     """Return dashboard stats — case counts by status and severity."""
     return get_dashboard_stats()
-```
 
----
-
-**COMMIT MESSAGE:**
-```
-Add triage API routes — triage, cases, status updates, notes, close, dashboard
