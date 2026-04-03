@@ -155,10 +155,4 @@ def get_dashboard_stats() -> dict:
         "medium":      sum(1 for c in all_cases if c.severity == Severity.MEDIUM),
         "low":         sum(1 for c in all_cases if c.severity == Severity.LOW),
     }
-```
 
----
-
-**COMMIT MESSAGE:**
-```
-Add case manager service — open, update, close, timeline logging, dashboard stats
