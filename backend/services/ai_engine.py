@@ -136,10 +136,3 @@ async def generate_report(
         playbook         = data.get("playbook", []),
         generated_at     = datetime.utcnow(),
     )
-```
-
----
-
-**COMMIT MESSAGE:**
-```
-Add AI engine service — Claude generates incident report, MITRE mapping, playbook
