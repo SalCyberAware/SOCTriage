@@ -1,131 +1,68 @@
-import uuid
-from datetime import datetime
-from typing import Dict, List, Optional
-from models import (
-    Case,
-    CaseStatus,
-    EnrichmentResult,
-    IOCType,
-    IncidentReport,
-    Severity,
-    TimelineEvent,
-)
+import os
+import json
+from anthropic import AsyncAnthropic
+from models import AlertIntake, EnrichmentResult, IncidentReport, MITRETechnique, Severity
+
+client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
-class CaseManager:
-    def __init__(self):
-        self.cases: Dict[str, Case] = {}
+async def generate_report(enrichment: EnrichmentResult, alert: AlertIntake) -> IncidentReport:
+    prompt = f"""You are a senior SOC analyst. Analyze this threat intelligence and generate a structured incident report.
 
-    def open_case(
-        self,
-        ioc: str,
-        ioc_type: IOCType,
-        severity: Severity,
-        enrichment: EnrichmentResult,
-        report: IncidentReport,
-        analyst_notes: Optional[str] = None,
-    ) -> Case:
-        case_id = str(uuid.uuid4())[:8].upper()
-        now = datetime.utcnow().isoformat()
+IOC: {enrichment.ioc}
+Type: {enrichment.ioc_type}
+Verdict: {enrichment.verdict}
+Threat Score: {enrichment.score}/100
+Engine Results: {json.dumps(enrichment.engines, indent=2)}
+Raw Alert: {alert.raw_alert or 'Not provided'}
+Analyst Notes: {alert.analyst_notes or 'None'}
 
-        timeline = [
-            TimelineEvent(
-                timestamp=now,
-                action="Case opened",
-                analyst="system",
-                notes=f"IOC: {ioc} | Score: {enrichment.score} | Verdict: {enrichment.verdict}",
-            )
-        ]
+Respond ONLY with a JSON object (no markdown, no backticks) with this exact structure:
+{{
+  "title": "brief incident title",
+  "severity": "LOW|MEDIUM|HIGH|CRITICAL",
+  "summary": "2-3 sentence executive summary",
+  "affected_assets": ["list of potentially affected assets"],
+  "threat_type": "e.g. Malware, C2, Phishing, Scanning, etc.",
+  "mitre_techniques": [
+    {{
+      "technique_id": "T1234",
+      "technique_name": "Technique Name",
+      "tactic": "Tactic Name",
+      "description": "How this technique applies",
+      "mitre_url": "https://attack.mitre.org/techniques/T1234/"
+    }}
+  ],
+  "recommended_actions": ["action 1", "action 2", "action 3"],
+  "playbook": "step-by-step response playbook as a string"
+}}"""
 
-        if analyst_notes:
-            timeline.append(
-                TimelineEvent(
-                    timestamp=now,
-                    action="Analyst note added",
-                    analyst="analyst",
-                    notes=analyst_notes,
-                )
-            )
+    message = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+    )
 
-        case = Case(
-            case_id=case_id,
-            ioc=ioc,
-            ioc_type=ioc_type,
-            status=CaseStatus.OPEN,
-            severity=severity,
-            created_at=now,
-            timeline=timeline,
-            report=report,
-            enrichment=enrichment,
-        )
+    text = message.content[0].text
+    text = text.replace("```json", "").replace("```", "").strip()
+    data = json.loads(text)
 
-        self.cases[case_id] = case
-        return case
+    severity_map = {
+        "LOW": Severity.LOW,
+        "MEDIUM": Severity.MEDIUM,
+        "HIGH": Severity.HIGH,
+        "CRITICAL": Severity.CRITICAL,
+    }
+    severity = severity_map.get(data.get("severity", "MEDIUM"), Severity.MEDIUM)
+    mitre_techniques = [MITRETechnique(**t) for t in data.get("mitre_techniques", [])]
 
-    def list_cases(self) -> List[Case]:
-        return list(self.cases.values())
-
-    def get_case(self, case_id: str) -> Optional[Case]:
-        return self.cases.get(case_id)
-
-    def update_status(self, case_id: str, status: CaseStatus) -> Optional[Case]:
-        case = self.cases.get(case_id)
-        if not case:
-            return None
-        case.status = status
-        case.timeline.append(
-            TimelineEvent(
-                timestamp=datetime.utcnow().isoformat(),
-                action=f"Status updated to {status.value}",
-                analyst="analyst",
-                notes="",
-            )
-        )
-        return case
-
-    def add_note(self, case_id: str, note: str) -> Optional[Case]:
-        case = self.cases.get(case_id)
-        if not case:
-            return None
-        case.timeline.append(
-            TimelineEvent(
-                timestamp=datetime.utcnow().isoformat(),
-                action="Note added",
-                analyst="analyst",
-                notes=note,
-            )
-        )
-        return case
-
-    def close_case(self, case_id: str, resolution: str) -> Optional[Case]:
-        case = self.cases.get(case_id)
-        if not case:
-            return None
-        case.status = CaseStatus.CLOSED
-        case.timeline.append(
-            TimelineEvent(
-                timestamp=datetime.utcnow().isoformat(),
-                action="Case closed",
-                analyst="analyst",
-                notes=resolution,
-            )
-        )
-        return case
-
-    def get_stats(self) -> dict:
-        cases = list(self.cases.values())
-        stats: dict = {
-            "total": len(cases),
-            "by_status": {},
-            "by_severity": {},
-        }
-        for status in CaseStatus:
-            stats["by_status"][status.value] = sum(1 for c in cases if c.status == status)
-        for severity in Severity:
-            stats["by_severity"][severity.value] = sum(
-                1 for c in cases if c.severity == severity
-            )
-        return stats
-
-
-case_manager = CaseManager()
+    return IncidentReport(
+        title=data.get("title", "Untitled Incident"),
+        severity=severity,
+        summary=data.get("summary", ""),
+        affected_assets=data.get("affected_assets", []),
+        threat_type=data.get("threat_type", "Unknown"),
+        mitre_techniques=mitre_techniques,
+        recommended_actions=data.get("recommended_actions", []),
+        playbook=data.get("playbook", ""),
+    )
