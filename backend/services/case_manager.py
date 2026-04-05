@@ -1,158 +1,131 @@
 import uuid
 from datetime import datetime
-from typing import Dict, Optional, List
+from typing import Dict, List, Optional
 from models import (
-    Case, CaseStatus, Severity, TimelineEvent,
-    EnrichmentResult, IncidentReport
+    Case,
+    CaseStatus,
+    EnrichmentResult,
+    IOCType,
+    IncidentReport,
+    Severity,
+    TimelineEvent,
 )
 
-# In-memory store — will upgrade to PostgreSQL in Phase 2
-_cases: Dict[str, Case] = {}
 
+class CaseManager:
+    def __init__(self):
+        self.cases: Dict[str, Case] = {}
 
-def create_case(
-    ioc: str,
-    ioc_type: str,
-    severity: Severity,
-    enrichment: EnrichmentResult,
-    report: IncidentReport,
-    analyst_notes: Optional[str] = None,
-) -> Case:
-    """Open a new investigation case."""
-    case_id = f"CASE-{str(uuid.uuid4())[:8].upper()}"
-    now     = datetime.utcnow()
+    def open_case(
+        self,
+        ioc: str,
+        ioc_type: IOCType,
+        severity: Severity,
+        enrichment: EnrichmentResult,
+        report: IncidentReport,
+        analyst_notes: Optional[str] = None,
+    ) -> Case:
+        case_id = str(uuid.uuid4())[:8].upper()
+        now = datetime.utcnow().isoformat()
 
-    case = Case(
-        case_id       = case_id,
-        ioc           = ioc,
-        ioc_type      = ioc_type,
-        status        = CaseStatus.OPEN,
-        severity      = severity,
-        created_at    = now,
-        updated_at    = now,
-        enrichment    = enrichment,
-        report        = report,
-        analyst_notes = analyst_notes,
-        timeline      = [
+        timeline = [
             TimelineEvent(
-                timestamp = now,
-                action    = "Case opened",
-                analyst   = "system",
-                notes     = f"IOC: {ioc} | Verdict: {enrichment.verdict} | Score: {enrichment.score}/100",
+                timestamp=now,
+                action="Case opened",
+                analyst="system",
+                notes=f"IOC: {ioc} | Score: {enrichment.score} | Verdict: {enrichment.verdict}",
             )
-        ],
-    )
+        ]
 
-    _cases[case_id] = case
-    return case
+        if analyst_notes:
+            timeline.append(
+                TimelineEvent(
+                    timestamp=now,
+                    action="Analyst note added",
+                    analyst="analyst",
+                    notes=analyst_notes,
+                )
+            )
 
+        case = Case(
+            case_id=case_id,
+            ioc=ioc,
+            ioc_type=ioc_type,
+            status=CaseStatus.OPEN,
+            severity=severity,
+            created_at=now,
+            timeline=timeline,
+            report=report,
+            enrichment=enrichment,
+        )
 
-def get_case(case_id: str) -> Optional[Case]:
-    """Retrieve a case by ID."""
-    return _cases.get(case_id)
+        self.cases[case_id] = case
+        return case
 
+    def list_cases(self) -> List[Case]:
+        return list(self.cases.values())
 
-def get_all_cases() -> List[Case]:
-    """Return all cases sorted by severity then created_at."""
-    severity_order = {
-        CaseStatus.OPEN:        0,
-        CaseStatus.IN_PROGRESS: 1,
-        CaseStatus.ESCALATED:   2,
-        CaseStatus.CLOSED:      3,
-    }
-    return sorted(
-        _cases.values(),
-        key=lambda c: (severity_order.get(c.status, 9), c.created_at),
-        reverse=False,
-    )
+    def get_case(self, case_id: str) -> Optional[Case]:
+        return self.cases.get(case_id)
 
+    def update_status(self, case_id: str, status: CaseStatus) -> Optional[Case]:
+        case = self.cases.get(case_id)
+        if not case:
+            return None
+        case.status = status
+        case.timeline.append(
+            TimelineEvent(
+                timestamp=datetime.utcnow().isoformat(),
+                action=f"Status updated to {status.value}",
+                analyst="analyst",
+                notes="",
+            )
+        )
+        return case
 
-def update_case_status(
-    case_id: str,
-    status: CaseStatus,
-    analyst: str = "analyst",
-    notes: Optional[str] = None,
-) -> Optional[Case]:
-    """Update case status and log to timeline."""
-    case = _cases.get(case_id)
-    if not case:
-        return None
+    def add_note(self, case_id: str, note: str) -> Optional[Case]:
+        case = self.cases.get(case_id)
+        if not case:
+            return None
+        case.timeline.append(
+            TimelineEvent(
+                timestamp=datetime.utcnow().isoformat(),
+                action="Note added",
+                analyst="analyst",
+                notes=note,
+            )
+        )
+        return case
 
-    old_status  = case.status
-    case.status = status
-    case.updated_at = datetime.utcnow()
+    def close_case(self, case_id: str, resolution: str) -> Optional[Case]:
+        case = self.cases.get(case_id)
+        if not case:
+            return None
+        case.status = CaseStatus.CLOSED
+        case.timeline.append(
+            TimelineEvent(
+                timestamp=datetime.utcnow().isoformat(),
+                action="Case closed",
+                analyst="analyst",
+                notes=resolution,
+            )
+        )
+        return case
 
-    case.timeline.append(TimelineEvent(
-        timestamp = datetime.utcnow(),
-        action    = f"Status changed: {old_status} → {status}",
-        analyst   = analyst,
-        notes     = notes,
-    ))
-
-    _cases[case_id] = case
-    return case
-
-
-def add_note(
-    case_id: str,
-    note: str,
-    analyst: str = "analyst",
-) -> Optional[Case]:
-    """Add analyst note and log to timeline."""
-    case = _cases.get(case_id)
-    if not case:
-        return None
-
-    case.analyst_notes = note
-    case.updated_at    = datetime.utcnow()
-
-    case.timeline.append(TimelineEvent(
-        timestamp = datetime.utcnow(),
-        action    = "Analyst note added",
-        analyst   = analyst,
-        notes     = note,
-    ))
-
-    _cases[case_id] = case
-    return case
-
-
-def close_case(
-    case_id: str,
-    resolution: str,
-    analyst: str = "analyst",
-) -> Optional[Case]:
-    """Close a case with resolution notes."""
-    case = _cases.get(case_id)
-    if not case:
-        return None
-
-    case.status     = CaseStatus.CLOSED
-    case.updated_at = datetime.utcnow()
-
-    case.timeline.append(TimelineEvent(
-        timestamp = datetime.utcnow(),
-        action    = "Case closed",
-        analyst   = analyst,
-        notes     = resolution,
-    ))
-
-    _cases[case_id] = case
-    return case
+    def get_stats(self) -> dict:
+        cases = list(self.cases.values())
+        stats: dict = {
+            "total": len(cases),
+            "by_status": {},
+            "by_severity": {},
+        }
+        for status in CaseStatus:
+            stats["by_status"][status.value] = sum(1 for c in cases if c.status == status)
+        for severity in Severity:
+            stats["by_severity"][severity.value] = sum(
+                1 for c in cases if c.severity == severity
+            )
+        return stats
 
 
-def get_dashboard_stats() -> dict:
-    """Return summary stats for the dashboard."""
-    all_cases = list(_cases.values())
-    return {
-        "total":       len(all_cases),
-        "open":        sum(1 for c in all_cases if c.status == CaseStatus.OPEN),
-        "in_progress": sum(1 for c in all_cases if c.status == CaseStatus.IN_PROGRESS),
-        "escalated":   sum(1 for c in all_cases if c.status == CaseStatus.ESCALATED),
-        "closed":      sum(1 for c in all_cases if c.status == CaseStatus.CLOSED),
-        "critical":    sum(1 for c in all_cases if c.severity == Severity.CRITICAL),
-        "high":        sum(1 for c in all_cases if c.severity == Severity.HIGH),
-        "medium":      sum(1 for c in all_cases if c.severity == Severity.MEDIUM),
-        "low":         sum(1 for c in all_cases if c.severity == Severity.LOW),
-    }
-
+case_manager = CaseManager()
