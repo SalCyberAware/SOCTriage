@@ -1,68 +1,78 @@
-import os
-import json
-from anthropic import AsyncAnthropic
-from models import AlertIntake, EnrichmentResult, IncidentReport, MITRETechnique, Severity
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from models import AlertIntake, CaseStatus
+from services.enrichment import enrich_ioc
+from services.ai_engine import generate_report
+from services.case_manager import case_manager
 
-client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+router = APIRouter(prefix="/api")
 
 
-async def generate_report(enrichment: EnrichmentResult, alert: AlertIntake) -> IncidentReport:
-    prompt = f"""You are a senior SOC analyst. Analyze this threat intelligence and generate a structured incident report.
+class StatusUpdate(BaseModel):
+    status: CaseStatus
 
-IOC: {enrichment.ioc}
-Type: {enrichment.ioc_type}
-Verdict: {enrichment.verdict}
-Threat Score: {enrichment.score}/100
-Engine Results: {json.dumps(enrichment.engines, indent=2)}
-Raw Alert: {alert.raw_alert or 'Not provided'}
-Analyst Notes: {alert.analyst_notes or 'None'}
 
-Respond ONLY with a JSON object (no markdown, no backticks) with this exact structure:
-{{
-  "title": "brief incident title",
-  "severity": "LOW|MEDIUM|HIGH|CRITICAL",
-  "summary": "2-3 sentence executive summary",
-  "affected_assets": ["list of potentially affected assets"],
-  "threat_type": "e.g. Malware, C2, Phishing, Scanning, etc.",
-  "mitre_techniques": [
-    {{
-      "technique_id": "T1234",
-      "technique_name": "Technique Name",
-      "tactic": "Tactic Name",
-      "description": "How this technique applies",
-      "mitre_url": "https://attack.mitre.org/techniques/T1234/"
-    }}
-  ],
-  "recommended_actions": ["action 1", "action 2", "action 3"],
-  "playbook": "step-by-step response playbook as a string"
-}}"""
+class NoteUpdate(BaseModel):
+    note: str
 
-    message = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-    )
 
-    text = message.content[0].text
-    text = text.replace("```json", "").replace("```", "").strip()
-    data = json.loads(text)
+class CloseRequest(BaseModel):
+    resolution: str
 
-    severity_map = {
-        "LOW": Severity.LOW,
-        "MEDIUM": Severity.MEDIUM,
-        "HIGH": Severity.HIGH,
-        "CRITICAL": Severity.CRITICAL,
-    }
-    severity = severity_map.get(data.get("severity", "MEDIUM"), Severity.MEDIUM)
-    mitre_techniques = [MITRETechnique(**t) for t in data.get("mitre_techniques", [])]
 
-    return IncidentReport(
-        title=data.get("title", "Untitled Incident"),
+@router.post("/triage")
+async def triage_alert(alert: AlertIntake):
+    enrichment = await enrich_ioc(alert.ioc, alert.ioc_type)
+    report = await generate_report(enrichment, alert)
+    severity = alert.severity_override or report.severity
+    case = case_manager.open_case(
+        ioc=alert.ioc,
+        ioc_type=alert.ioc_type,
         severity=severity,
-        summary=data.get("summary", ""),
-        affected_assets=data.get("affected_assets", []),
-        threat_type=data.get("threat_type", "Unknown"),
-        mitre_techniques=mitre_techniques,
-        recommended_actions=data.get("recommended_actions", []),
-        playbook=data.get("playbook", ""),
+        enrichment=enrichment,
+        report=report,
+        analyst_notes=alert.analyst_notes,
     )
+    return case
+
+
+@router.get("/cases")
+async def list_cases():
+    return case_manager.list_cases()
+
+
+@router.get("/cases/{case_id}")
+async def get_case(case_id: str):
+    case = case_manager.get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return case
+
+
+@router.patch("/cases/{case_id}/status")
+async def update_status(case_id: str, body: StatusUpdate):
+    case = case_manager.update_status(case_id, body.status)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return case
+
+
+@router.patch("/cases/{case_id}/note")
+async def add_note(case_id: str, body: NoteUpdate):
+    case = case_manager.add_note(case_id, body.note)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return case
+
+
+@router.patch("/cases/{case_id}/close")
+async def close_case(case_id: str, body: CloseRequest):
+    case = case_manager.close_case(case_id, body.resolution)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return case
+
+
+@router.get("/dashboard")
+async def dashboard():
+    return case_manager.get_stats()
