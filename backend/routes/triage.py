@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from models import AlertIntake, CaseStatus
+from models import AlertIntake, CaseStatus, TriageResponse
 from services.enrichment import enrich_ioc
 from services.ai_engine import generate_report
 from services.case_manager import case_manager
@@ -20,7 +20,7 @@ class CloseRequest(BaseModel):
     resolution: str
 
 
-@router.post("/triage")
+@router.post("/triage", response_model=TriageResponse)
 async def triage_alert(alert: AlertIntake):
     enrichment = await enrich_ioc(alert.ioc, alert.ioc_type)
     report = await generate_report(enrichment, alert)
@@ -33,7 +33,7 @@ async def triage_alert(alert: AlertIntake):
         report=report,
         analyst_notes=alert.analyst_notes,
     )
-    return case
+    return TriageResponse(case_id=case.case_id, enrichment=enrichment, report=report)
 
 
 @router.get("/cases")
