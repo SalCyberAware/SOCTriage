@@ -15,6 +15,14 @@ SOCTriage automates the first 30 minutes of SOC alert triage. Paste an IP, domai
 
 Enterprise SOAR platforms (Splunk SOAR, Palo Alto XSOAR) cost **$100,000+ per year**. SOCTriage is free.
 
+<div align="center">
+
+![SOCTriage Incident Report](soctriage-report.png)
+
+![MITRE Techniques and Engine Verdicts](soctriage-techniques.png)
+
+</div>
+
 ---
 
 ## Live Demo
