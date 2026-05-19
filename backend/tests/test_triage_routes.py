@@ -7,8 +7,9 @@ the autouse ``clean_db`` fixture gives every test a fresh, empty SQLite
 database, and ``manager`` / ``make_enrichment`` / ``make_report`` seed cases
 through the same CaseManager the routes use.
 
-POST /api/triage is intentionally skipped here -- it calls enrichment and
-the AI engine, which is exercised separately.
+POST /api/triage is covered here too, with the outbound enrichment + AI
+calls monkeypatched so the route exercises end-to-end without touching
+ThreatScan or Anthropic.
 """
 from fastapi.testclient import TestClient
 
@@ -16,6 +17,7 @@ import pytest
 
 from main import app
 from models import CaseStatus, IOCType, Severity
+from routes import triage as triage_route
 
 
 @pytest.fixture
@@ -264,3 +266,126 @@ def test_close_case_returns_404_for_unknown_id(client):
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Case not found"}
+
+
+# ── POST /api/triage ─────────────────────────────────────────────────────────
+
+
+def _patch_triage_externals(monkeypatch, enrichment, report):
+    """Replace the route's enrichment + AI calls with async stubs.
+
+    The route imports ``enrich_ioc`` and ``generate_report`` into its own
+    namespace, so the patches must target ``routes.triage`` -- not the
+    underlying service modules.
+    """
+    captured = {}
+
+    async def fake_enrich(ioc, ioc_type):
+        captured["enrich_args"] = (ioc, ioc_type)
+        return enrichment
+
+    async def fake_generate(enr, alert):
+        captured["generate_args"] = (enr, alert)
+        return report
+
+    monkeypatch.setattr(triage_route, "enrich_ioc", fake_enrich)
+    monkeypatch.setattr(triage_route, "generate_report", fake_generate)
+    return captured
+
+
+def test_triage_endpoint_returns_triage_response_and_persists_case(
+    client, monkeypatch, make_enrichment, make_report
+):
+    enrichment = make_enrichment(
+        ioc="185.220.101.45", ioc_type="ip", verdict="malicious", score=87,
+    )
+    report = make_report(
+        ioc="185.220.101.45", ioc_type="ip", verdict="malicious", score=87,
+        severity=Severity.HIGH,
+    )
+    captured = _patch_triage_externals(monkeypatch, enrichment, report)
+
+    response = client.post(
+        "/api/triage",
+        json={
+            "raw_alert": "CrowdStrike: suspicious outbound connection",
+            "ioc": "185.220.101.45",
+            "ioc_type": "ip",
+            "analyst_notes": "Triggered on WS-042",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # The TriageResponse shape: case_id + enrichment + report + status.
+    assert body["status"] == "success"
+    assert body["case_id"]
+    assert body["enrichment"]["ioc"] == "185.220.101.45"
+    assert body["enrichment"]["verdict"] == "malicious"
+    assert body["enrichment"]["score"] == 87
+    assert body["report"]["title"] == "Triage of 185.220.101.45"
+    assert body["report"]["severity"] == "high"
+
+    # The stubs were invoked with the alert's IOC/type, not random values.
+    assert captured["enrich_args"][0] == "185.220.101.45"
+    assert captured["enrich_args"][1] == IOCType.IP
+
+    # The case persisted -- it shows up in GET /api/cases and is fetchable
+    # by id, with the analyst notes the intake supplied.
+    listed = client.get("/api/cases").json()
+    assert len(listed) == 1
+    assert listed[0]["case_id"] == body["case_id"]
+    assert listed[0]["ioc"] == "185.220.101.45"
+    assert listed[0]["status"] == "open"
+    assert listed[0]["severity"] == "high"
+
+    fetched = client.get(f"/api/cases/{body['case_id']}").json()
+    assert fetched["analyst_notes"] == "Triggered on WS-042"
+    assert fetched["enrichment"]["verdict"] == "malicious"
+    assert fetched["report"]["title"] == "Triage of 185.220.101.45"
+
+
+def test_triage_endpoint_applies_severity_override(
+    client, monkeypatch, make_enrichment, make_report
+):
+    """severity_override on the alert wins over the AI engine's severity."""
+    enrichment = make_enrichment(verdict="suspicious", score=42)
+    # AI engine says medium, but the analyst overrides to critical.
+    report = make_report(severity=Severity.MEDIUM, verdict="suspicious", score=42)
+    _patch_triage_externals(monkeypatch, enrichment, report)
+
+    response = client.post(
+        "/api/triage",
+        json={
+            "ioc": "8.8.8.8",
+            "ioc_type": "ip",
+            "severity_override": "critical",
+        },
+    )
+
+    assert response.status_code == 200
+    case_id = response.json()["case_id"]
+    fetched = client.get(f"/api/cases/{case_id}").json()
+    assert fetched["severity"] == "critical"
+
+
+def test_triage_endpoint_returns_422_when_ioc_missing(client):
+    """ioc is the only required field on AlertIntake; omitting it is a 422."""
+    response = client.post("/api/triage", json={"ioc_type": "ip"})
+
+    assert response.status_code == 422
+    body = response.json()
+    # FastAPI/Pydantic surfaces a "detail" list naming the bad field.
+    assert "detail" in body
+    assert any("ioc" in str(err.get("loc", [])) for err in body["detail"])
+
+
+def test_triage_endpoint_returns_422_for_invalid_ioc_type(client):
+    """ioc_type is an enum; an unknown value must fail validation."""
+    response = client.post(
+        "/api/triage",
+        json={"ioc": "8.8.8.8", "ioc_type": "not_a_real_type"},
+    )
+
+    assert response.status_code == 422
