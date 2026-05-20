@@ -208,3 +208,5 @@ __marimo__/
 
 # Local SQLite database (development only)
 *.db
+
+.claude/
