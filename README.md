@@ -235,3 +235,7 @@ GitHub: [@SalCyberAware](https://github.com/SalCyberAware)
 ## License
 
 MIT — free to use, modify, and distribute.
+
+---
+
+_Status (May 2026): backend is PostgreSQL-backed with a 71-test pytest suite running on GitHub Actions CI. Frontend auto-deploys to Vercel._
