@@ -76,6 +76,28 @@ SOCTriage enriches IOCs through ThreatScan, which queries:
 
 ---
 
+## How SOCTriage compares
+
+SOCTriage is a fast first-pass triage layer: paste an IOC, get enriched intel from 11 sources, an AI-generated incident report mapped to MITRE ATT&CK, and a tracked case with timeline in under a minute. It is **not** a full SOAR platform — it's the layer that compresses the 15–30 minutes of manual tab-switching and report-writing that usually happens **before** a SOAR playbook fires (or in place of one, for teams without SOAR budget). Honest comparison:
+
+| Tool | Category | Cost | Strengths | Where SOCTriage differs |
+|------|----------|------|-----------|--------------------------|
+| Cortex XSOAR / Splunk SOAR / Tines | Enterprise SOAR | ~$100k+/yr | Massive integration libraries, playbook automation across hundreds of tools, mature case management, SLA dashboards | SOCTriage is zero-install (one Vercel + one Railway deploy), free, and AI-first — no playbook authoring required. Meant to slot in **before** these for first-pass triage, not replace them |
+| TheHive + Cortex | Open-source SOC platform | Free, self-hosted | Mature case management, observable enrichment via Cortex analyzers, MISP integration, active community | SOCTriage is hosted (no Elasticsearch/Cassandra ops burden); ships LLM-generated narrative reports + auto-derived ATT&CK techniques instead of raw analyzer output you compose yourself |
+| Manual workflow (SIEM + tabs + ticketing) | What most small SOC teams actually do | "Free," burns analyst time | Full flexibility, familiar tools, no new platform to learn | SOCTriage compresses paste-IOC → 11-engine enrich → ATT&CK mapping → AI report → tracked case into one request; the manual equivalent is 15–30 min per alert across many tabs |
+
+**A note on the AI-generated MITRE mapping:** technique IDs, tactics, and `attack.mitre.org` URLs are produced by Claude per-triage from the enriched intel and alert context, not from a static mapping table. That makes them context-aware (the same IOC in a different alert context can map to different techniques), but reviewers should sanity-check the techniques on high-stakes incidents the same way they would any LLM output.
+
+**A note on the enrichment layer:** SOCTriage delegates the 11-engine fan-out to its sister project [ThreatScan](https://github.com/SalCyberAware/ThreatScan) via an HTTP call. The intel work isn't reinvented — SOCTriage adds the AI report, ATT&CK mapping, and case lifecycle on top.
+
+### When to use what
+
+- **Use enterprise SOAR (Cortex XSOAR, Splunk SOAR, Tines)** when you have a team of analysts, dozens of integrations to orchestrate, complex playbooks, and the budget for the licenses.
+- **Use TheHive + Cortex** when you want full self-hosted control over case data, have the ops capacity to run Elasticsearch/Cassandra, and prefer composing analyzers yourself.
+- **Use SOCTriage** when you're a small/mid SOC team that needs fast first-pass triage without enterprise overhead — especially for the AI-generated incident report and ATT&CK mapping out of the box.
+
+---
+
 ## API Endpoints
 
 ```
