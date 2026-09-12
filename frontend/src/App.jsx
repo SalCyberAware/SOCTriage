@@ -2,18 +2,30 @@ import { useState, useEffect, useCallback } from "react";
 
 const API = import.meta.env.VITE_API_URL || "https://soctriage-production.up.railway.app";
 
+// Keys match the Severity / CaseStatus enum *values* from the API, which are
+// lowercase ("low", "in_progress"). Badge and button styling upper-cases them
+// for display via text-transform.
 const SEVERITY_COLOR = {
-  LOW: "#22c55e",
-  MEDIUM: "#f59e0b",
-  HIGH: "#f97316",
-  CRITICAL: "#ef4444",
+  low: "#22c55e",
+  medium: "#f59e0b",
+  high: "#f97316",
+  critical: "#ef4444",
 };
 
 const STATUS_COLOR = {
-  OPEN: "#60a5fa",
-  IN_PROGRESS: "#f59e0b",
-  ESCALATED: "#f97316",
-  CLOSED: "#6b7280",
+  open: "#60a5fa",
+  in_progress: "#f59e0b",
+  escalated: "#f97316",
+  closed: "#6b7280",
+};
+
+const CASE_STATUSES = ["open", "in_progress", "escalated", "closed"];
+
+const HEALTH_COLOR = {
+  checking: "#f59e0b",
+  online: "#00d4aa",
+  degraded: "#f59e0b",
+  offline: "#ef4444",
 };
 
 const IOC_TYPES = ["IP", "URL", "DOMAIN", "HASH"];
@@ -87,6 +99,16 @@ function ReportView({ result, onBack }) {
   const r = result.report;
   const e = result.enrichment;
   const sevColor = SEVERITY_COLOR[r.severity] || "#6b7280";
+  // The API types playbook as List[str]; tolerate a bare string just in case.
+  const playbookSteps = Array.isArray(r.playbook)
+    ? r.playbook
+    : typeof r.playbook === "string"
+      ? r.playbook.split("\n").filter(step => step.trim())
+      : [];
+  // The model usually numbers its own steps ("Step 1 - TRIAGE: ..."). Only let
+  // the list add markers when it hasn't, so we never render "1. Step 1 - ...".
+  const selfNumbered =
+    playbookSteps.length > 0 && playbookSteps.every(step => /^\s*(?:step\s*)?\d+\s*[-–—.:)]/i.test(step));
 
   return (
     <div className="report-view fade-in">
@@ -101,7 +123,7 @@ function ReportView({ result, onBack }) {
           <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <Badge label={r.severity} color={sevColor} size="lg" />
             <Badge label={r.threat_type} color="var(--accent)" />
-            <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>{result.ioc}</span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>{e.ioc}</span>
           </div>
         </div>
         <div style={{ textAlign: "right" }}>
@@ -144,10 +166,12 @@ function ReportView({ result, onBack }) {
         </div>
       )}
 
-      {r.playbook && (
+      {playbookSteps.length > 0 && (
         <div className="report-section">
           <div className="section-label">Response Playbook</div>
-          <pre style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-soft)", whiteSpace: "pre-wrap", lineHeight: 1.7, background: "var(--surface2)", padding: 16, borderRadius: 6, border: "1px solid var(--border)" }}>{r.playbook}</pre>
+          <ol className={`playbook${selfNumbered ? " unnumbered" : ""}`}>
+            {playbookSteps.map((step, i) => <li key={i}>{step}</li>)}
+          </ol>
         </div>
       )}
 
@@ -298,13 +322,58 @@ function TriageTab() {
   );
 }
 
+/** Pull a human-readable message out of a failed response. */
+async function describeError(resp) {
+  try {
+    const body = await resp.json();
+    // FastAPI sends a string detail for HTTPException and an array for 422.
+    if (typeof body?.detail === "string") return body.detail;
+    if (Array.isArray(body?.detail) && body.detail[0]?.msg) return body.detail[0].msg;
+  } catch {
+    // No JSON body — fall through to the status line.
+  }
+  return `server returned ${resp.status}`;
+}
+
+function HealthIndicator() {
+  const [health, setHealth] = useState("checking");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function check() {
+      try {
+        const resp = await fetch(`${API}/health`);
+        if (!resp.ok) throw new Error();
+        const data = await resp.json();
+        if (!cancelled) setHealth(data.status === "ok" ? "online" : "degraded");
+      } catch {
+        if (!cancelled) setHealth("offline");
+      }
+    }
+
+    check();
+    const timer = setInterval(check, 30000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 28, fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+      <span className="health-dot" style={{ background: HEALTH_COLOR[health] }} />
+      {API.replace(/^https?:\/\//, "")} · {health}
+    </div>
+  );
+}
+
 function CasesTab() {
   const [cases, setCases] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
+  const [error, setError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError("");
     try {
       const r = await fetch(`${API}/api/cases`);
       const data = await r.json();
@@ -319,12 +388,18 @@ function CasesTab() {
   useEffect(() => { load(); }, [load]);
 
   async function updateStatus(caseId, status) {
-    await fetch(`${API}/api/cases/${caseId}/status`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status }),
-    });
-    load();
+    setError("");
+    try {
+      const resp = await fetch(`${API}/api/cases/${caseId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!resp.ok) throw new Error(await describeError(resp));
+      await load();
+    } catch (e) {
+      setError(`Could not update case #${caseId}: ${e.message}`);
+    }
   }
 
   if (loading) return <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", fontFamily: "var(--mono)" }}>Loading cases…</div>;
@@ -341,6 +416,8 @@ function CasesTab() {
         <h2 style={{ margin: 0 }}>Cases <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 16 }}>({cases.length})</span></h2>
         <button className="btn-ghost" onClick={load}>↻ Refresh</button>
       </div>
+
+      {error && <div className="error-banner" style={{ marginBottom: 16 }}>✗ {error}</div>}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {cases.map(c => (
@@ -360,7 +437,7 @@ function CasesTab() {
             {expanded === c.case_id && (
               <div className="case-detail fade-in">
                 <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {["OPEN", "IN_PROGRESS", "ESCALATED", "CLOSED"].map(s => (
+                  {CASE_STATUSES.map(s => (
                     <button
                       key={s}
                       className={`status-btn ${c.status === s ? "active" : ""}`}
@@ -783,6 +860,39 @@ export default function App() {
         .status-btn:hover { border-color: var(--btn-color); color: var(--btn-color); }
         .status-btn.active { background: var(--btn-color); color: #000; border-color: var(--btn-color); font-weight: 700; }
 
+        .playbook {
+          margin: 0;
+          padding-left: 20px;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .playbook li {
+          font-family: var(--mono);
+          font-size: 12px;
+          color: var(--text-soft);
+          line-height: 1.7;
+          white-space: pre-wrap;
+          padding-left: 4px;
+        }
+
+        .playbook li::marker { color: var(--accent); }
+
+        /* The report's own "Step N" prefixes are the numbering in this case. */
+        .playbook.unnumbered { list-style: none; padding-left: 0; }
+        .playbook.unnumbered li { padding-left: 0; }
+
+        .error-banner {
+          background: #ef444422;
+          border: 1px solid #ef444455;
+          border-radius: 6px;
+          padding: 10px 14px;
+          color: #ef4444;
+          font-size: 13px;
+          font-family: var(--mono);
+        }
+
         .health-dot {
           width: 8px;
           height: 8px;
@@ -824,10 +934,7 @@ export default function App() {
           </nav>
         </header>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 28, fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-          <span className="health-dot" />
-          soctriage-production.up.railway.app · online
-        </div>
+        <HealthIndicator />
 
         {tab === "triage" && <TriageTab />}
         {tab === "cases" && <CasesTab />}
