@@ -1,0 +1,183 @@
+name: Security
+
+# Tier 1 of PromptShield's docs/AUTOMATION_PLAN.md, ported to SOCTriage.
+#
+# Nothing in this workflow modifies a file, opens a pull request, or touches
+# production. Each scanner is its own job so that a red check names the scanner
+# that found something instead of pointing at a single "security" blob.
+#
+# Kept separate from backend-tests.yml on purpose. A scanner going red is a
+# different signal from the tests going red, and the two should be readable
+# apart.
+#
+# SOCTriage is Python on the backend and React on the frontend, so both a
+# pip-audit job and an npm audit job apply here. Unlike PromptShield there is no
+# installable root package, so there is a single Python tree to audit:
+# backend/requirements.txt.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Mondays at 06:00 UTC. Push and pull request triggers only fire
+    # when the code changes. A CVE disclosed against a dependency that has not
+    # changed in months would never surface without a scheduled run.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: pip-audit (backend dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        # 3.11.9 to match backend/runtime.txt and backend-tests.yml, so the
+        # dependency tree resolves the way it does in production.
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11.9"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      # Deliberately unpinned. Advisory data comes from the PyPI service at run
+      # time rather than from the tool, so a current pip-audit is what keeps the
+      # detection logic fresh. Pinning it would freeze the scanner while the
+      # thing it scans for keeps moving.
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      # This audits the resolved tree, not just the eight pinned lines in the
+      # file, which matters here: the findings as of 2026-09-16 are in starlette,
+      # a transitive dependency pulled in by fastapi and never named in
+      # requirements.txt.
+      #
+      # This job is expected to be red. As of 2026-09-16 the tree carries 8
+      # advisories: 7 in starlette 0.38.6 and 1 in python-dotenv 1.0.1. Nothing
+      # is ignored or suppressed to hide that; clearing it needs a dependency
+      # bump, which is a Tier 2 change for a human to merge.
+      - name: Audit backend/requirements.txt
+        run: pip-audit -r backend/requirements.txt --progress-spinner off
+
+  npm-audit:
+    name: npm audit (frontend production tree)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        # No frontend job exists in backend-tests.yml to match, so this picks the
+        # same Node 24 the sibling repos use for their frontends. That this repo
+        # has no frontend test or lint job at all is a real gap, tracked in the
+        # plan rather than here.
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      # Why --omit=dev:
+      #
+      # The dev tree here is the Vite and ESLint build toolchain. It runs on a CI
+      # runner and on a developer's laptop. It is never served to a browser and
+      # never present in the deployed bundle, so an advisory against a transitive
+      # build dependency is not a vulnerability in the shipped product. As of
+      # 2026-09-16 the full tree carries 8 such findings (6 high, 1 moderate,
+      # 1 low: vite, postcss, nanoid, browserslist, brace-expansion, js-yaml,
+      # baseline-browser-mapping, @babel/core). The production tree, which is
+      # React and React DOM, carries zero.
+      #
+      # Including them would make this job permanently red for reasons nobody can
+      # act on except by waiting for an upstream release, and a check that is red
+      # for unactionable reasons is a check that gets ignored.
+      #
+      # This is scope, not threshold. Nothing is ignored, and the backend tree
+      # above is deliberately not filtered the same way, because that code does
+      # run in production.
+      #
+      # No `npm ci` step: npm audit resolves the tree from package-lock.json and
+      # does not need node_modules on disk.
+      - name: Audit frontend production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  gitleaks:
+    name: gitleaks (secret scanning, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v6
+        with:
+          # A secret that was committed and later deleted is still in the history
+          # and still compromised. The default shallow clone would scan only the
+          # tip and report a clean repo either way.
+          #
+          # This repo calls the Anthropic API and talks to a Postgres instance,
+          # so it handles both a vendor API key and a database URL.
+          fetch-depth: 0
+
+      # Installed from the pinned release and checksum-verified rather than
+      # pulled from a floating action tag, so a compromised upstream tag cannot
+      # silently change what runs here. Worth the care in this repo in
+      # particular, whose Railway build already disables mise's own attestation
+      # verification as a workaround.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # --redact matters because this is a public repository: the Actions log is
+      # world-readable, and a finding printed in full would republish the secret
+      # to a second place. The rule name, file, and commit are enough to act on.
+      - name: Scan the full git history
+        run: gitleaks git . --redact --verbose
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["python", "javascript-typescript"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      # Both languages are interpreted, so there is no build step to run.
+      #
+      # Note on reading this job: a green check here means the analysis ran, not
+      # that it found nothing. CodeQL uploads alerts to the Security tab and does
+      # not fail the workflow on them by design. Triage the Security tab weekly;
+      # do not read this checkmark as an all-clear.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
