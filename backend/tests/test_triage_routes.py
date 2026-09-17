@@ -52,6 +52,38 @@ def test_health_returns_ok_payload(client):
     assert body["version"] == "1.0.0"
 
 
+def test_health_reports_unknown_commit_when_unset(client, monkeypatch):
+    """Local development, where no platform variable is set, still works."""
+    monkeypatch.delenv("RAILWAY_GIT_COMMIT_SHA", raising=False)
+    monkeypatch.delenv("GIT_COMMIT_SHA", raising=False)
+
+    assert client.get("/health").json()["commit"] == "unknown"
+
+
+def test_health_reports_railway_commit_sha(client, monkeypatch):
+    """On Railway the deployed commit is reported verbatim."""
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "a" * 40)
+
+    assert client.get("/health").json()["commit"] == "a" * 40
+
+
+def test_health_commit_falls_back_to_platform_neutral_override(client, monkeypatch):
+    """GIT_COMMIT_SHA covers hosts that are not Railway; Railway's wins."""
+    monkeypatch.delenv("RAILWAY_GIT_COMMIT_SHA", raising=False)
+    monkeypatch.setenv("GIT_COMMIT_SHA", "b" * 40)
+    assert client.get("/health").json()["commit"] == "b" * 40
+
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "c" * 40)
+    assert client.get("/health").json()["commit"] == "c" * 40
+
+
+def test_health_keeps_existing_fields_alongside_commit(client):
+    """The uptime monitor reads status/service/version — adding commit is additive."""
+    body = client.get("/health").json()
+
+    assert set(body) == {"status", "service", "version", "commit"}
+
+
 # ── GET /api/cases ───────────────────────────────────────────────────────────
 
 
