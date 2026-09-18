@@ -1,5 +1,5 @@
 -r requirements.txt
-pytest>=8.0
+pytest>=9.1.1
 pytest-cov>=4.0
 # Lint and type checking, matching PromptShield's dev tooling. Configured by
 # backend/ruff.toml and backend/mypy.ini.
