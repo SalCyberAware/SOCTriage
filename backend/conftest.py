@@ -98,3 +98,18 @@ def make_report():
         )
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiter(monkeypatch):
+    """Give each test a fresh limiter so per-IP/daily state never leaks across tests.
+
+    The limiter holds in-memory counters for the process lifetime, which in a test
+    run means "for the whole suite" -- one test's writes would otherwise eat into
+    the next test's allowance. Limit-specific tests replace this with their own
+    configured limiter.
+    """
+    import limits
+    from routes import triage as triage_route
+
+    monkeypatch.setattr(triage_route, "limiter", limits.Limiter())

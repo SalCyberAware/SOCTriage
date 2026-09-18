@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- **Abuse controls on the four write endpoints** (`backend/limits.py`) — a per-IP rate limit (default 10 writes / 5 minutes, shared across `POST /api/triage` and the three `PATCH` routes) returning `429` with a `Retry-After` header; a global daily cap on `POST /api/triage` (default 50 per UTC day) returning `503`; and length caps on every free-text input (`raw_alert` 10,000 chars, `ioc` 256, `analyst_notes` / `note` / `resolution` 2,000) returning `400`. Every check runs before the ThreatScan enrichment and the Anthropic call, so a rejected request spends no quota and opens no case. All six limits are configurable via `SOCTRIAGE_*` environment variables, and a junk or non-positive value falls back to the default rather than disabling the cap. The reads (`GET /api/cases`, `/api/cases/{id}`, `/api/dashboard`) and `/health` are deliberately left open: they cost nothing per call.
+
+### Security
+
+- The daily cap covers `POST /api/triage` alone because it is the only endpoint with money attached — one Anthropic completion plus one ThreatScan scan, which itself fans out to 11 engines behind their own free-tier quotas. Limiter state is in-memory and single-instance: it resets when the process restarts, making the daily cap a soft backstop rather than an accounting guarantee. A shared store such as Redis is the multi-instance upgrade.
+
 ## [1.0.0] - 2026-05-27
 
 Initial public release.
