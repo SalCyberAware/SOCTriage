@@ -4,5 +4,5 @@ httpx==0.27.2
 python-dotenv==1.2.2
 anthropic==0.34.2
 pydantic==2.9.2
-sqlalchemy>=2.0.30
+sqlalchemy>=2.0.53
 psycopg2-binary>=2.9.10
