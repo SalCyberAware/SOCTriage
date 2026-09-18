@@ -7,12 +7,9 @@ These tests rely on the fixtures defined in backend/conftest.py:
 - ``manager`` provides a fresh CaseManager wired to that database.
 - ``make_enrichment`` / ``make_report`` build minimal valid Pydantic payloads.
 """
-from datetime import datetime, timezone
 
-import pytest
 
 from models import CaseStatus, IOCType, Severity
-
 
 # ── open_case ────────────────────────────────────────────────────────────────
 

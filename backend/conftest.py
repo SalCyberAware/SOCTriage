@@ -7,7 +7,7 @@ imported. Every test then runs against freshly created, empty tables.
 """
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # Point the app at a throwaway SQLite database BEFORE importing anything that
 # reads DATABASE_URL -- database.py resolves it at import time.
@@ -94,7 +94,7 @@ def make_report():
             ],
             recommended_actions=["Isolate the affected host."],
             playbook=["Verify the alert", "Contain", "Eradicate"],
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
         )
 
     return _make

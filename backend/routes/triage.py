@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
 from limits import LimitRejectedError, build_limiter, client_ip
 from models import AlertIntake, CaseStatus, TriageResponse
-from services.enrichment import enrich_ioc
 from services.ai_engine import generate_report
 from services.case_manager import case_manager
+from services.enrichment import enrich_ioc
 
 router = APIRouter(prefix="/api")
 

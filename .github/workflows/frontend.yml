@@ -1,0 +1,49 @@
+name: Frontend
+
+# The frontend had eslint wired into package.json but nothing ever ran it, so
+# two react-hooks/set-state-in-effect errors sat in src/App.jsx unnoticed. Both
+# are now fixed; neither turned out to be a live user-visible bug (the vitest
+# specs added with the fixes pass against the old code too), but both were the
+# structure that produced ThreatScan's dropped-file bug, one feature away.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Lint, build and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Lint with eslint
+        run: npm run lint
+
+      # The build is a gate in its own right: it is what Vercel runs, so a
+      # failure here is a failure to deploy.
+      - name: Build with vite
+        run: npm run build
+
+      - name: Run vitest
+        run: npm test

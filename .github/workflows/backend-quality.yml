@@ -1,0 +1,77 @@
+name: Backend quality
+
+# Lint and type checking for the backend, split from "Backend tests" so a red
+# run names which gate failed without having to open the logs.
+#
+# This closes the gap the September 2026 fastapi bump exposed: that upgrade
+# (0.115.0 -> 0.141.1, pulling starlette 0.38.6 -> 1.6.0) had to be validated by
+# hand-diffing the old and new stacks, because nothing in CI would have caught a
+# renamed symbol or a changed signature. Now something does.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    name: Lint with ruff
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Keep in sync with backend/runtime.txt.
+          python-version: '3.11.9'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Application code and tests both, configured by backend/ruff.toml.
+      - name: Run ruff check
+        run: ruff check . --output-format=github
+
+  mypy:
+    name: Type check with mypy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11.9'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      # The real dependencies, not just mypy: without sqlalchemy, fastapi and
+      # pydantic installed, mypy cannot see their types and the run is close to
+      # meaningless.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Scope and strictness come from backend/mypy.ini, which also records the
+      # measured cost of moving to --strict and the steps to get there.
+      - name: Run mypy
+        run: mypy

@@ -209,3 +209,73 @@ def test_enrich_ioc_returns_error_result_on_malformed_json(monkeypatch):
     assert result.verdict == "error"
     assert result.score == 0
     assert result.engines == []
+
+
+# ── omitted ioc_type ─────────────────────────────────────────────────────────
+#
+# AlertIntake.ioc_type is optional, but enrich_ioc used to pass it straight
+# into EnrichmentResult.ioc_type, which is a required string. Omitting the type
+# therefore raised a ValidationError in the success branch, and again in the
+# except branch that was supposed to swallow it, surfacing as a 500. The type
+# is now detected here instead. Caught by mypy, not by the suite.
+
+
+@pytest.mark.parametrize(
+    ("ioc", "expected"),
+    [
+        ("8.8.8.8", IOCType.IP),
+        ("185.220.101.45", IOCType.IP),
+        ("malware.example.com", IOCType.DOMAIN),
+        ("https://evil.example.com/payload", IOCType.URL),
+        ("HTTP://EVIL.EXAMPLE.COM", IOCType.URL),
+        ("d41d8cd98f00b204e9800998ecf8427e", IOCType.HASH),
+        ("a" * 64, IOCType.HASH),
+        ("  8.8.8.8  ", IOCType.IP),
+        ("", IOCType.IP),
+    ],
+)
+def test_detect_ioc_type(ioc, expected):
+    """Mirrors detectType in the frontend, including the empty-string default."""
+    assert enrichment.detect_ioc_type(ioc) == expected
+
+
+def test_enrich_ioc_detects_the_type_when_omitted(monkeypatch):
+    """The success branch must produce a valid result with no type supplied."""
+    def handler(url, json):
+        return httpx.Response(200, json={"verdict": "malicious", "score": 87,
+                                         "engines": []})
+
+    _install_post(monkeypatch, handler)
+
+    result = _run(enrich_ioc("malware.example.com"))
+
+    assert isinstance(result, EnrichmentResult)
+    assert result.ioc_type == "domain"
+    assert result.verdict == "malicious"
+
+
+def test_enrich_ioc_detects_the_type_when_omitted_on_failure(monkeypatch):
+    """And so must the fallback branch -- it used to raise a second time."""
+    def handler(url, json):
+        raise httpx.ConnectError("connection refused")
+
+    _install_post(monkeypatch, handler)
+
+    result = _run(enrich_ioc("8.8.8.8"))
+
+    assert result.ioc_type == "ip"
+    assert result.verdict == "error"
+    assert result.engines == []
+
+
+def test_enrich_ioc_prefers_an_explicit_type_over_detection(monkeypatch):
+    """An analyst override still wins over what the indicator looks like."""
+    def handler(url, json):
+        return httpx.Response(200, json={"verdict": "clean", "score": 0, "engines": []})
+
+    _install_post(monkeypatch, handler)
+
+    # Looks like a domain, but the analyst said URL.
+    result = _run(enrich_ioc("evil.example.com", IOCType.URL))
+
+    assert result.ioc_type == "url"

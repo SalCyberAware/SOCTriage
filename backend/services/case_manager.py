@@ -7,8 +7,7 @@ method still accepts and returns the same Pydantic types as before, so the
 routes did not have to change.
 """
 import uuid
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
@@ -68,9 +67,9 @@ class CaseManager:
 
     def open_case(self, ioc: str, ioc_type, severity: Severity,
                   enrichment: EnrichmentResult, report: IncidentReport,
-                  analyst_notes: Optional[str] = None) -> Case:
+                  analyst_notes: str | None = None) -> Case:
         case_id = str(uuid.uuid4())[:8].upper()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         timeline = [
             _event(
@@ -103,22 +102,22 @@ class CaseManager:
             session.commit()
             return _row_to_case(row)
 
-    def list_cases(self) -> List[Case]:
+    def list_cases(self) -> list[Case]:
         with SessionLocal() as session:
             rows = session.scalars(select(CaseRow).order_by(CaseRow.created_at)).all()
             return [_row_to_case(row) for row in rows]
 
-    def get_case(self, case_id: str) -> Optional[Case]:
+    def get_case(self, case_id: str) -> Case | None:
         with SessionLocal() as session:
             row = session.get(CaseRow, case_id)
             return _row_to_case(row) if row else None
 
-    def update_status(self, case_id: str, status: CaseStatus) -> Optional[Case]:
+    def update_status(self, case_id: str, status: CaseStatus) -> Case | None:
         with SessionLocal() as session:
             row = session.get(CaseRow, case_id)
             if row is None:
                 return None
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             row.status = status.value if isinstance(status, CaseStatus) else str(status)
             row.updated_at = now
             row.timeline = row.timeline + [
@@ -127,23 +126,23 @@ class CaseManager:
             session.commit()
             return _row_to_case(row)
 
-    def add_note(self, case_id: str, note: str) -> Optional[Case]:
+    def add_note(self, case_id: str, note: str) -> Case | None:
         with SessionLocal() as session:
             row = session.get(CaseRow, case_id)
             if row is None:
                 return None
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             row.updated_at = now
             row.timeline = row.timeline + [_event("Note added", "analyst", note, now)]
             session.commit()
             return _row_to_case(row)
 
-    def close_case(self, case_id: str, resolution: str) -> Optional[Case]:
+    def close_case(self, case_id: str, resolution: str) -> Case | None:
         with SessionLocal() as session:
             row = session.get(CaseRow, case_id)
             if row is None:
                 return None
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             row.status = CaseStatus.CLOSED.value
             row.updated_at = now
             row.timeline = row.timeline + [
@@ -155,16 +154,21 @@ class CaseManager:
     def get_stats(self) -> dict:
         with SessionLocal() as session:
             total = session.scalar(select(func.count()).select_from(CaseRow)) or 0
-            status_counts = dict(
-                session.execute(
+            # Unpacked per row rather than dict(rows): a SQLAlchemy Row is
+            # iterable but is not typed as a 2-tuple, so dict() over it has no
+            # inferable key/value type.
+            status_counts: dict[str, int] = {
+                status: count
+                for status, count in session.execute(
                     select(CaseRow.status, func.count()).group_by(CaseRow.status)
                 ).all()
-            )
-            severity_counts = dict(
-                session.execute(
+            }
+            severity_counts: dict[str, int] = {
+                severity: count
+                for severity, count in session.execute(
                     select(CaseRow.severity, func.count()).group_by(CaseRow.severity)
                 ).all()
-            )
+            }
 
         return {
             "total": total,

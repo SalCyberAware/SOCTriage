@@ -27,6 +27,10 @@ export default defineConfig([
     },
   },
   {
+    files: ['src/**/*.test.{js,jsx}', 'src/test/**/*.js'],
+    languageOptions: { globals: { ...globals.browser, ...globals.node } },
+  },
+  {
     // vite.config.js runs in Node, not the browser: the build-commit plugin
     // reads process.env. Without this it trips no-undef under browser globals.
     files: ['vite.config.js'],

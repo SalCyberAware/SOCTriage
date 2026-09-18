@@ -1,0 +1,27 @@
+# Ruff configuration for the SOCTriage backend.
+#
+# Mirrors PromptShield's conventions (line-length 120, target py311, the
+# E/F/I/N/W/UP rule set) so the two repositories lint the same way.
+#
+# A standalone ruff.toml rather than a [tool.ruff] table in a pyproject.toml:
+# this backend is deployed by Railway from requirements.txt + Procfile and is
+# not an installable Python package. Adding a pyproject.toml would invite the
+# builder to treat the directory as one.
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    # str+Enum -> StrEnum is a subtle behavior change, not a rewrite: it changes
+    # what str(Severity.LOW) produces, and case_manager branches on exactly that
+    # (severity.value if isinstance(...) else str(severity)). Deferred to a
+    # planned refactor, same as PromptShield.
+    "UP042",
+]
+
+[lint.per-file-ignores]
+# Line 1 of the prompt is sent verbatim to Claude. Reflowing it to satisfy the
+# margin would change the bytes the model receives, and a noqa comment cannot
+# go on that line without landing inside the f-string itself.
+"services/ai_engine.py" = ["E501"]

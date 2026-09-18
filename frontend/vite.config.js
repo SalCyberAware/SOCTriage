@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
@@ -35,4 +35,13 @@ const buildCommitMeta = () => ({
 export default defineConfig({
   // Fast refresh in dev, JSX transform in the production build.
   plugins: [react(), buildCommitMeta()],
+  test: {
+    // React Testing Library needs a DOM.
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.js'],
+    include: ['src/**/*.test.{js,jsx}'],
+    // No `globals: true` on purpose: every spec imports describe/it/expect/vi
+    // from vitest explicitly, so eslint needs no extra global allowlist.
+    globals: false,
+  },
 })

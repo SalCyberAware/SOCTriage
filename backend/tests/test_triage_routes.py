@@ -11,9 +11,8 @@ POST /api/triage is covered here too, with the outbound enrichment + AI
 calls monkeypatched so the route exercises end-to-end without touching
 ThreatScan or Anthropic.
 """
-from fastapi.testclient import TestClient
-
 import pytest
+from fastapi.testclient import TestClient
 
 from main import app
 from models import CaseStatus, IOCType, Severity
@@ -421,3 +420,48 @@ def test_triage_endpoint_returns_422_for_invalid_ioc_type(client):
     )
 
     assert response.status_code == 422
+
+
+# ── POST /api/triage without ioc_type (regression) ───────────────────────────
+
+
+def test_triage_endpoint_succeeds_without_an_ioc_type(
+    client, monkeypatch, make_report
+):
+    """ioc_type is optional on AlertIntake, so omitting it must not 500.
+
+    This drives the REAL enrichment service with only the HTTP call stubbed,
+    because the bug lived in enrich_ioc: it put the intake's None straight into
+    EnrichmentResult.ioc_type, a required string, and the resulting
+    ValidationError was raised again by the except branch meant to swallow it.
+    Mocking enrich_ioc the way the tests above do would hide it completely.
+    """
+    import httpx
+
+    async def fake_post(self, url, json=None, **kwargs):
+        return httpx.Response(
+            200,
+            json={"verdict": "malicious", "score": 87, "engines": []},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    async def fake_generate(enrichment, alert):
+        return make_report(
+            ioc=enrichment.ioc, ioc_type=enrichment.ioc_type,
+            verdict=enrichment.verdict, score=enrichment.score,
+            severity=Severity.HIGH,
+        )
+
+    monkeypatch.setattr(triage_route, "generate_report", fake_generate)
+
+    response = client.post("/api/triage", json={"ioc": "malware.example.com"})
+
+    assert response.status_code == 200
+    body = response.json()
+    # The type was detected from the indicator rather than left as null.
+    assert body["enrichment"]["ioc_type"] == "domain"
+
+    fetched = client.get(f"/api/cases/{body['case_id']}").json()
+    assert fetched["ioc_type"] == "domain"

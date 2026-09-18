@@ -22,7 +22,6 @@ from models import AlertIntake, IOCType, Severity
 from services import ai_engine
 from services.ai_engine import generate_report
 
-
 # ── test helpers ─────────────────────────────────────────────────────────────
 
 

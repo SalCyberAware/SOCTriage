@@ -1,7 +1,9 @@
-import os
 import json
-from datetime import datetime, timezone
+import os
+from datetime import UTC, datetime
+
 from anthropic import AsyncAnthropic
+
 from models import AlertIntake, EnrichmentResult, IncidentReport, MITRETechnique, Severity
 
 client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -43,8 +45,17 @@ Respond ONLY with a JSON object (no markdown, no backticks) with this exact stru
         messages=[{"role": "user", "content": prompt}],
     )
 
-    text = message.content[0].text
-    text = text.replace("```json", "").replace("```", "").strip()
+    # content[0] is a text block for this request -- no tools are declared and
+    # thinking is off -- but the SDK types it as a union of block kinds, so read
+    # the text defensively. A non-text block now fails with a clear message
+    # instead of an AttributeError deep in the parse.
+    block = message.content[0]
+    raw_text = getattr(block, "text", None)
+    if not isinstance(raw_text, str):
+        raise ValueError(
+            f"Expected a text block from Claude, got {type(block).__name__}"
+        )
+    text = raw_text.replace("```json", "").replace("```", "").strip()
     data = json.loads(text)
 
     severity_map = {
@@ -73,5 +84,5 @@ Respond ONLY with a JSON object (no markdown, no backticks) with this exact stru
         mitre_techniques=mitre_techniques,
         recommended_actions=data.get("recommended_actions", []),
         playbook=playbook,
-        generated_at=datetime.now(timezone.utc),
+        generated_at=datetime.now(UTC),
     )

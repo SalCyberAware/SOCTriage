@@ -1,5 +1,5 @@
-from contextlib import asynccontextmanager
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from database import init_db
-from routes.triage import router as triage_router
+# Imported after load_dotenv() on purpose: database.py resolves DATABASE_URL at
+# import time, so the .env file has to be loaded before it is imported.
+from database import init_db  # noqa: E402
+from routes.triage import router as triage_router  # noqa: E402
 
 
 @asynccontextmanager

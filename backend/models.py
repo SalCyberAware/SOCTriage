@@ -1,8 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional, List
 from datetime import datetime
 from enum import Enum
 
+from pydantic import BaseModel
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -28,11 +27,11 @@ class IOCType(str, Enum):
 # ── Alert Intake ──────────────────────────────────────────────────────────────
 
 class AlertIntake(BaseModel):
-    raw_alert:        Optional[str] = None   # Raw alert text from SIEM
+    raw_alert:        str | None = None   # Raw alert text from SIEM
     ioc:              str                    # IP, URL, domain, or hash
-    ioc_type:         Optional[IOCType] = None
-    analyst_notes:    Optional[str] = None
-    severity_override: Optional[Severity] = None
+    ioc_type:         IOCType | None = None
+    analyst_notes:    str | None = None
+    severity_override: Severity | None = None
 
     class Config:
         json_schema_extra = {
@@ -51,15 +50,15 @@ class AlertIntake(BaseModel):
 class EngineResult(BaseModel):
     id:      str
     verdict: str
-    detail:  Optional[str] = None
-    score:   Optional[float] = None
+    detail:  str | None = None
+    score:   float | None = None
 
 class EnrichmentResult(BaseModel):
     ioc:      str
     ioc_type: str
     verdict:  str
     score:    int
-    engines:  List[EngineResult]
+    engines:  list[EngineResult]
 
 
 # ── MITRE ATT&CK ──────────────────────────────────────────────────────────────
@@ -78,15 +77,15 @@ class IncidentReport(BaseModel):
     title:           str
     severity:        Severity
     summary:         str
-    affected_assets: List[str]
+    affected_assets: list[str]
     threat_type:     str
     ioc:             str
     ioc_type:        str
     verdict:         str
     score:           int
-    mitre_techniques: List[MITRETechnique]
-    recommended_actions: List[str]
-    playbook:        List[str]
+    mitre_techniques: list[MITRETechnique]
+    recommended_actions: list[str]
+    playbook:        list[str]
     generated_at:    datetime
 
 
@@ -95,8 +94,8 @@ class IncidentReport(BaseModel):
 class TimelineEvent(BaseModel):
     timestamp: datetime
     action:    str
-    analyst:   Optional[str] = "analyst"
-    notes:     Optional[str] = None
+    analyst:   str | None = "analyst"
+    notes:     str | None = None
 
 class Case(BaseModel):
     case_id:        str
@@ -106,10 +105,10 @@ class Case(BaseModel):
     severity:       Severity
     created_at:     datetime
     updated_at:     datetime
-    enrichment:     Optional[EnrichmentResult] = None
-    report:         Optional[IncidentReport] = None
-    timeline:       List[TimelineEvent] = []
-    analyst_notes:  Optional[str] = None
+    enrichment:     EnrichmentResult | None = None
+    report:         IncidentReport | None = None
+    timeline:       list[TimelineEvent] = []
+    analyst_notes:  str | None = None
 
 
 # ── API Responses ─────────────────────────────────────────────────────────────

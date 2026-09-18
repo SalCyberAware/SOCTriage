@@ -210,16 +210,34 @@ function ReportView({ result, onBack }) {
 
 function TriageTab() {
   const [ioc, setIoc] = useState("");
-  const [iocType, setIocType] = useState("IP");
+  // The IOC type is derived during render, not stored by an effect. An explicit
+  // pick from the select wins over auto-detection until the analyst types a new
+  // indicator.
+  //
+  // The effect this replaces (keyed on [ioc]) produced the same visible
+  // behaviour today, because `ioc` has exactly one writer -- the text input
+  // below -- so there was never a second write for it to clobber. It was a trap
+  // rather than a live bug: an effect keyed on [ioc] cannot tell "the analyst
+  // typed" from "some other action set the indicator", so the first feature to
+  // set `ioc` programmatically (an example chip, a rescan button, a deep-link
+  // prefill) would have had its accompanying type silently reverted one render
+  // later. That is exactly how ThreatScan's dropped-file details were wiped.
+  const [typeOverride, setTypeOverride] = useState(null);
   const [rawAlert, setRawAlert] = useState("");
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    setIocType(detectType(ioc));
-  }, [ioc]);
+  const iocType = typeOverride ?? detectType(ioc);
+
+  // The "analyst entered a new indicator" reset lives here, in the one handler
+  // that knows a human edited the field, so a future programmatic write to
+  // `ioc` can set the type alongside it without this stealing it back.
+  function updateIoc(value) {
+    setIoc(value);
+    setTypeOverride(null);
+  }
 
   async function submit() {
     if (!ioc.trim()) return;
@@ -265,7 +283,7 @@ function TriageTab() {
             <input
               className="input"
               value={ioc}
-              onChange={e => setIoc(e.target.value)}
+              onChange={e => updateIoc(e.target.value)}
               onKeyDown={e => e.key === "Enter" && submit()}
               placeholder="8.8.8.8 · malware.example.com · https://... · d41d8cd..."
               spellCheck={false}
@@ -273,7 +291,7 @@ function TriageTab() {
           </div>
           <div className="form-group" style={{ flex: 1 }}>
             <label>IOC Type</label>
-            <select className="input" value={iocType} onChange={e => setIocType(e.target.value)}>
+            <select className="input" value={iocType} onChange={e => setTypeOverride(e.target.value)}>
               {IOC_TYPES.map(t => <option key={t}>{t}</option>)}
             </select>
           </div>
@@ -371,21 +389,40 @@ function CasesTab() {
   const [expanded, setExpanded] = useState(null);
   const [error, setError] = useState("");
 
+  // The bare fetch, with no state transitions in it, so the mount effect and
+  // the post-write refresh can share one definition of the endpoint shape.
+  const fetchCases = useCallback(async () => {
+    const r = await fetch(`${API}/api/cases`);
+    const data = await r.json();
+    return Array.isArray(data) ? data.reverse() : [];
+  }, []);
+
+  // Refresh after a write. Showing the spinner is wanted here, and setting
+  // state synchronously inside an event handler is fine.
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const r = await fetch(`${API}/api/cases`);
-      const data = await r.json();
-      setCases(Array.isArray(data) ? data.reverse() : []);
+      setCases(await fetchCases());
     } catch {
       setCases([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchCases]);
 
-  useEffect(() => { load(); }, [load]);
+  // The initial load. `loading` already starts true, so there is nothing to set
+  // synchronously: every write happens in a promise callback once the request
+  // resolves. The cancelled flag stops a response that lands after unmount, or
+  // after a newer refresh, from overwriting fresher state.
+  useEffect(() => {
+    let cancelled = false;
+    fetchCases()
+      .then(data => { if (!cancelled) setCases(data); })
+      .catch(() => { if (!cancelled) setCases([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [fetchCases]);
 
   async function updateStatus(caseId, status) {
     setError("");

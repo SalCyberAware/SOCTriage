@@ -80,10 +80,11 @@ def client_ip(request: Any) -> str:
     Takes anything with ``.headers`` and ``.client`` (a Starlette ``Request``),
     so this module stays independent of the web framework and easy to unit test.
     """
-    forwarded = request.headers.get("x-forwarded-for")
+    forwarded: str | None = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    peer: str | None = request.client.host if request.client else None
+    return peer or "unknown"
 
 
 class Limiter:
