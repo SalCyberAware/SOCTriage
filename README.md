@@ -231,18 +231,40 @@ The cost is bounded and recoverable: a fresh clone cannot PATCH until it sets
 the variable, and the 401 body says exactly that. Nothing that makes the demo
 work is affected either way.
 
-### The hosted demo
+### The frontend and the hosted demo
 
 [soctriage.vercel.app](https://soctriage.vercel.app) ships **no API key**. A
-browser bundle cannot hold a secret — anything baked into it is readable by
-anyone who opens devtools — so the demo does not pretend to have one. In
-practice that means the **status buttons on the Cases tab are read-only on the
-public demo**: pressing one surfaces the 401 in the error banner instead of
-changing the case. Triage, the case list, the timeline and the dashboard all
-work exactly as before.
+browser bundle cannot hold a secret — whatever is compiled into it is inlined
+at build time and readable by anyone who opens devtools — so the demo does not
+pretend to have one.
 
-To drive the write endpoints, use `curl`, a script, or your own deployment with
-the key set and a client that can keep it server-side.
+The Cases tab reflects that honestly. With no key configured, the expanded case
+shows a short note in place of the status buttons, linking back to this
+section, rather than offering a button that can only ever return 401:
+
+> Changing a case requires an API key, and this build has none — the case below
+> is read-only. [How authentication works](#authentication)
+
+**Everything else on the tab is unchanged**: the case list, the AI summary, the
+MITRE techniques, the full timeline, plus triage and the dashboard. Only the
+one write control goes away.
+
+### Giving the frontend a key
+
+Set `VITE_API_KEY` at build time and the status buttons come back, sending the
+key in `X-API-Key`:
+
+```bash
+echo "VITE_API_KEY=your_key" >> frontend/.env
+```
+
+Do this **only where the bundle itself is not public** — an internal
+deployment, a build behind SSO — and treat the value as disclosed regardless,
+because it is. A value that is empty or only whitespace counts as no key.
+
+For a public deployment, the options that actually keep a key secret are to
+drive the write endpoints from `curl` or a script, or to put a thin server-side
+proxy in front that holds the key and is itself rate-limited.
 
 ---
 
@@ -363,6 +385,10 @@ cd SOCTriage/frontend
 npm install
 
 echo "VITE_API_URL=http://localhost:8080" > .env
+
+# Optional: enables the Cases tab status buttons. Read the warning in
+# "Giving the frontend a key" above before setting this on a public build.
+echo "VITE_API_KEY=the_same_value_as_SOCTRIAGE_API_KEYS" >> .env
 
 npm run dev
 ```

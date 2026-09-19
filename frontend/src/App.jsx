@@ -2,6 +2,29 @@ import { useState, useEffect, useCallback } from "react";
 
 const API = import.meta.env.VITE_API_URL || "https://soctriage-production.up.railway.app";
 
+// Where the note below sends someone who wants to know why a button is missing.
+const README_AUTH_URL = "https://github.com/SalCyberAware/SOCTriage#authentication";
+
+// The API key for the case-write endpoints, if this build was given one.
+//
+// Deliberately absent from the hosted demo, and that is not an oversight: a
+// browser bundle cannot hold a secret. Whatever is set here is inlined into the
+// JavaScript at build time and readable by anyone who opens devtools, so a key
+// here is a published key. soctriage.vercel.app therefore ships without one and
+// the Cases tab shows a note in place of the status buttons, rather than
+// offering a button that can only ever return 401.
+//
+// Set it only where the bundle itself is not public -- an internal deployment,
+// a build behind SSO -- and treat the value as disclosed regardless. The
+// backend fails closed without SOCTRIAGE_API_KEYS set; see README Authentication.
+//
+// Read at call time rather than captured in a module constant so the tests can
+// vary it. Vite still inlines the literal at build time: the expression is
+// static either way.
+function apiKey() {
+  return (import.meta.env.VITE_API_KEY || "").trim();
+}
+
 // Keys match the Severity / CaseStatus enum *values* from the API, which are
 // lowercase ("low", "in_progress"). Badge and button styling upper-cases them
 // for display via text-transform.
@@ -384,6 +407,10 @@ function HealthIndicator() {
 }
 
 function CasesTab() {
+  // Whether this build can write at all. Everything else on the tab -- the
+  // list, the report, the MITRE techniques, the timeline -- renders the same
+  // either way; only the status buttons depend on it.
+  const canWrite = Boolean(apiKey());
   const [cases, setCases] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
@@ -427,9 +454,16 @@ function CasesTab() {
   async function updateStatus(caseId, status) {
     setError("");
     try {
+      const headers = { "Content-Type": "application/json" };
+      // Only sent when this build has a key. Without one the buttons that call
+      // this are not rendered at all, so reaching here unkeyed takes a
+      // deliberate console call -- and the backend answers it with a 401.
+      const key = apiKey();
+      if (key) headers["X-API-Key"] = key;
+
       const resp = await fetch(`${API}/api/cases/${caseId}/status`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ status }),
       });
       if (!resp.ok) throw new Error(await describeError(resp));
@@ -473,18 +507,28 @@ function CasesTab() {
 
             {expanded === c.case_id && (
               <div className="case-detail fade-in">
-                <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {CASE_STATUSES.map(s => (
-                    <button
-                      key={s}
-                      className={`status-btn ${c.status === s ? "active" : ""}`}
-                      onClick={() => updateStatus(c.case_id, s)}
-                      style={{ "--btn-color": STATUS_COLOR[s] }}
-                    >
-                      {s.replace("_", " ")}
-                    </button>
-                  ))}
-                </div>
+                {canWrite ? (
+                  <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {CASE_STATUSES.map(s => (
+                      <button
+                        key={s}
+                        className={`status-btn ${c.status === s ? "active" : ""}`}
+                        onClick={() => updateStatus(c.case_id, s)}
+                        style={{ "--btn-color": STATUS_COLOR[s] }}
+                      >
+                        {s.replace("_", " ")}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="auth-note">
+                    Changing a case requires an API key, and this build has none — the case
+                    below is read-only.{" "}
+                    <a href={README_AUTH_URL} target="_blank" rel="noreferrer">
+                      How authentication works
+                    </a>
+                  </p>
+                )}
 
                 {c.report && (
                   <>
@@ -893,6 +937,18 @@ export default function App() {
           text-transform: uppercase;
           letter-spacing: 0.06em;
         }
+
+        .auth-note {
+          margin: 0 0 12px;
+          padding: 8px 12px;
+          border: 1px solid var(--border);
+          border-radius: 4px;
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.6;
+        }
+
+        .auth-note a { color: var(--accent); }
 
         .status-btn:hover { border-color: var(--btn-color); color: var(--btn-color); }
         .status-btn.active { background: var(--btn-color); color: #000; border-color: var(--btn-color); font-weight: 700; }

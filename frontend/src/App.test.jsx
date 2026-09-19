@@ -73,6 +73,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -217,5 +218,152 @@ describe("Cases list loading", () => {
     await Promise.resolve();
 
     expect(errors).not.toHaveBeenCalled();
+  });
+});
+
+// The backend now requires an API key on PATCH /api/cases/{id}/status, and a
+// browser bundle cannot hold a secret, so the hosted build ships without one.
+// Rather than offering a status button that can only ever return 401, the tab
+// replaces the buttons with a note. These tests pin both halves: the note in
+// place of the buttons when unkeyed, the buttons plus the header when keyed.
+describe("Cases tab status buttons and the API key", () => {
+  const WRITABLE_CASE = {
+    case_id: "CASE0001",
+    ioc: "185.220.101.45",
+    ioc_type: "ip",
+    status: "open",
+    severity: "high",
+    created_at: "2026-09-18T00:00:00Z",
+    updated_at: "2026-09-18T00:00:00Z",
+    report: {
+      summary: "Outbound connection to a known C2 node.",
+      mitre_techniques: [
+        {
+          technique_id: "T1071.001",
+          technique_name: "Web Protocols",
+          mitre_url: "https://attack.mitre.org/techniques/T1071/001/",
+        },
+      ],
+    },
+    timeline: [
+      { timestamp: "2026-09-18T00:00:00Z", action: "Case opened", notes: null },
+    ],
+  };
+
+  /** Open the Cases tab and expand the one seeded case. */
+  async function expandTheCase(user) {
+    await user.click(casesTab());
+    await user.click(await screen.findByText(/185\.220\.101\.45/));
+  }
+
+  const statusButtons = () =>
+    screen.queryAllByRole("button", { name: /^(open|in progress|escalated|closed)$/i });
+
+  describe("with no key configured", () => {
+    it("shows a note instead of the status buttons", async () => {
+      installFetch({ cases: [WRITABLE_CASE] });
+      const user = userEvent.setup();
+      render(<App />);
+
+      await expandTheCase(user);
+
+      expect(
+        await screen.findByText(/Changing a case requires an API key/i)
+      ).toBeInTheDocument();
+      expect(statusButtons()).toHaveLength(0);
+    });
+
+    it("links the note to the README's Authentication section", async () => {
+      installFetch({ cases: [WRITABLE_CASE] });
+      const user = userEvent.setup();
+      render(<App />);
+
+      await expandTheCase(user);
+
+      const link = await screen.findByRole("link", {
+        name: /How authentication works/i,
+      });
+      expect(link).toHaveAttribute(
+        "href",
+        "https://github.com/SalCyberAware/SOCTriage#authentication"
+      );
+    });
+
+    it("leaves the rest of the case view intact", async () => {
+      // The point of the note is that only the write control goes away. The
+      // report, the MITRE techniques and the timeline all still render.
+      installFetch({ cases: [WRITABLE_CASE] });
+      const user = userEvent.setup();
+      render(<App />);
+
+      await expandTheCase(user);
+
+      expect(
+        await screen.findByText(/Outbound connection to a known C2 node/)
+      ).toBeInTheDocument();
+      expect(screen.getByText(/T1071\.001/)).toBeInTheDocument();
+      expect(screen.getByText(/Case opened/)).toBeInTheDocument();
+    });
+
+    it("sends no PATCH at all", async () => {
+      const calls = installFetch({ cases: [WRITABLE_CASE] });
+      const user = userEvent.setup();
+      render(<App />);
+
+      await expandTheCase(user);
+
+      expect(calls.filter(c => c.options?.method === "PATCH")).toHaveLength(0);
+    });
+  });
+
+  describe("with a key configured", () => {
+    it("renders the status buttons and no note", async () => {
+      vi.stubEnv("VITE_API_KEY", "a-configured-key");
+      installFetch({ cases: [WRITABLE_CASE] });
+      const user = userEvent.setup();
+      render(<App />);
+
+      await expandTheCase(user);
+
+      expect(statusButtons().length).toBeGreaterThan(0);
+      expect(
+        screen.queryByText(/Changing a case requires an API key/i)
+      ).not.toBeInTheDocument();
+    });
+
+    it("sends the key in the X-API-Key header on a status change", async () => {
+      vi.stubEnv("VITE_API_KEY", "a-configured-key");
+      const calls = installFetch({ cases: [WRITABLE_CASE] });
+      const user = userEvent.setup();
+      render(<App />);
+
+      await expandTheCase(user);
+      await user.click(screen.getByRole("button", { name: /^escalated$/i }));
+
+      const patch = await waitFor(() => {
+        const call = calls.find(c => c.options?.method === "PATCH");
+        expect(call).toBeDefined();
+        return call;
+      });
+      expect(patch.url).toContain("/api/cases/CASE0001/status");
+      expect(patch.options.headers["X-API-Key"]).toBe("a-configured-key");
+      expect(JSON.parse(patch.options.body)).toEqual({ status: "escalated" });
+    });
+
+    it("ignores a key that is only whitespace", async () => {
+      // An env var set to "" or " " in a deploy config is a key that is not
+      // configured, not a key of one space.
+      vi.stubEnv("VITE_API_KEY", "   ");
+      installFetch({ cases: [WRITABLE_CASE] });
+      const user = userEvent.setup();
+      render(<App />);
+
+      await expandTheCase(user);
+
+      expect(
+        await screen.findByText(/Changing a case requires an API key/i)
+      ).toBeInTheDocument();
+      expect(statusButtons()).toHaveLength(0);
+    });
   });
 });
