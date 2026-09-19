@@ -246,6 +246,77 @@ the key set and a client that can keep it server-side.
 
 ---
 
+## Audit Logging
+
+Every write records who did what. All four of them, including the
+unauthenticated `POST /api/triage` -- "an anonymous caller from 203.0.113.7
+opened case 4FA22FE3" is exactly the kind of thing the trail exists to answer.
+
+One JSON object per line on stdout, at INFO:
+
+```json
+{"ts":"2026-09-19T12:34:56.789012+00:00","event":"write","endpoint":"PATCH /api/cases/{case_id}/status","case_id":"4FA22FE3","ip":"203.0.113.7","authenticated":true}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `ts` | ISO 8601 instant, UTC |
+| `event` | Always `write` |
+| `endpoint` | The route template, not the concrete path, so entries group cleanly |
+| `case_id` | The case written. For `POST /api/triage`, the case it just opened |
+| `ip` | The client behind the proxy: leftmost `X-Forwarded-For`, else the socket peer |
+| `authenticated` | Whether the caller presented a valid API key |
+
+Entries are written **after** the write succeeds, so the trail is of changes
+that happened, not requests that were made: a 401, a 429, a 404 and every read
+record nothing at all.
+
+### What is never logged
+
+No key material, and no free text -- not `raw_alert`, not analyst notes, not
+note bodies, not resolution text. The entry records **that** a change happened;
+**what** it said belongs to the case timeline, which is already persisted and
+already served by `GET /api/cases/{id}`.
+
+That is structural rather than a matter of care: `audit.build_entry` has no
+parameter such a string could arrive through, and a test asserts the emitted
+keys are exactly the six above.
+
+### Why logs and not a database table
+
+An `audit_events` table next to `cases` was the obvious alternative. Three
+reasons against it here:
+
+1. **The database already records what changed.** Every one of these writes
+   appends a case timeline event that persists with the case. A table would
+   re-record the same facts a second time, and two stores meant to agree about
+   the same events eventually disagree about them.
+2. **What the trail adds is the operational half -- client IP and whether the
+   caller was authenticated -- and that half must not go in the cases table.**
+   The timeline is served verbatim by an open endpoint. Putting a client IP
+   there publishes it: a privacy leak introduced by the feature meant to
+   improve accountability.
+3. **A table nobody can read is not an audit trail.** Making it useful means a
+   query endpoint, which needs its own authorization and a retention policy for
+   the addresses it stores. Railway already captures stdout, with search and
+   retention handled by the platform, for no new surface area.
+
+The trade accepted along with that: retention is the platform's, not ours (a
+few days on Railway's smaller plans), and the trail cannot be joined to the
+cases table in SQL. If it ever needs to outlive the platform's window, the
+upgrade is to ship these lines to a log store -- the shape of the record does
+not change either way.
+
+Read them with `railway logs`, or filter to the trail alone:
+
+```bash
+railway logs | grep '"event":"write"'
+```
+
+No configuration: there is nothing to set, and nothing to turn off.
+
+---
+
 ## Self-Hosting
 
 ### Prerequisites
@@ -305,6 +376,7 @@ SOCTriage/
 ├── backend/
 │   ├── main.py              # FastAPI app, CORS, route registration
 │   ├── auth.py              # API key gate on the write endpoints
+│   ├── audit.py             # Structured audit trail for every write
 │   ├── limits.py            # Rate limits, daily cap, length caps
 │   ├── models.py            # Pydantic data models
 │   ├── requirements.txt
@@ -355,4 +427,4 @@ MIT — free to use, modify, and distribute.
 
 ---
 
-_Status (May 2026): backend is PostgreSQL-backed with a 71-test pytest suite running on GitHub Actions CI. Frontend auto-deploys to Vercel._
+_Status (September 2026): backend is PostgreSQL-backed with a 230-test pytest suite, plus ruff and mypy, running on GitHub Actions CI. Write endpoints are API-key authenticated and audit-logged. Frontend auto-deploys to Vercel, and every push is checked to confirm both surfaces are actually serving the pushed commit._

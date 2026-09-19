@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from auth import AuthRejectedError, require_api_key
+import audit
+from auth import AuthRejectedError, is_authenticated, require_api_key
 from limits import LimitRejectedError, build_limiter, client_ip
 from models import AlertIntake, CaseStatus, TriageResponse
 from services.ai_engine import generate_report
@@ -41,6 +42,15 @@ def _require_key(request: Request) -> None:
         ) from rejected
 
 
+def _audit_case_write(endpoint: str, case_id: str, ip: str) -> None:
+    """Record a completed write to an existing case.
+
+    ``authenticated=True`` without asking: every route that calls this is
+    behind :func:`_require_key`, so there is no other way to have reached it.
+    """
+    audit.record(endpoint=endpoint, case_id=case_id, ip=ip, authenticated=True)
+
+
 def _enforce(check, **kwargs) -> None:
     """Run one limiter check, translating a rejection into an HTTP error.
 
@@ -71,6 +81,7 @@ class CloseRequest(BaseModel):
 
 @router.post("/triage", response_model=TriageResponse)
 async def triage_alert(alert: AlertIntake, request: Request):
+    ip = client_ip(request)
     # Gated before enrichment and the AI call: this is the endpoint that spends
     # Anthropic and ThreatScan quota, and the only one under the daily cap.
     _enforce(
@@ -78,7 +89,7 @@ async def triage_alert(alert: AlertIntake, request: Request):
         raw_alert=alert.raw_alert,
         ioc=alert.ioc,
         analyst_notes=alert.analyst_notes,
-        ip=client_ip(request),
+        ip=ip,
     )
 
     enrichment = await enrich_ioc(alert.ioc, alert.ioc_type)
@@ -91,6 +102,15 @@ async def triage_alert(alert: AlertIntake, request: Request):
         enrichment=enrichment,
         report=report,
         analyst_notes=alert.analyst_notes,
+    )
+    # This route needs no key, but it can be given one, and the trail records
+    # which it was. Neither the raw_alert nor the analyst notes are logged --
+    # only that a case was opened, and by whom.
+    audit.record(
+        endpoint="POST /api/triage",
+        case_id=case.case_id,
+        ip=ip,
+        authenticated=is_authenticated(request),
     )
     return TriageResponse(case_id=case.case_id, enrichment=enrichment, report=report)
 
@@ -111,21 +131,27 @@ async def get_case(case_id: str):
 @router.patch("/cases/{case_id}/status")
 async def update_status(case_id: str, body: StatusUpdate, request: Request):
     _require_key(request)
+    ip = client_ip(request)
     # No free text to cap: the body is a CaseStatus enum.
-    _enforce(limiter.check_case_write, ip=client_ip(request))
+    _enforce(limiter.check_case_write, ip=ip)
 
     case = case_manager.update_status(case_id, body.status)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+    # After the write, so the trail records changes that happened. A 401, 429
+    # or 404 above leaves no entry, because none of them changed anything.
+    # authenticated is unconditionally True: _require_key is the only way here.
+    _audit_case_write("PATCH /api/cases/{case_id}/status", case_id, ip)
     return case
 
 
 @router.patch("/cases/{case_id}/note")
 async def add_note(case_id: str, body: NoteUpdate, request: Request):
     _require_key(request)
+    ip = client_ip(request)
     _enforce(
         limiter.check_case_write,
-        ip=client_ip(request),
+        ip=ip,
         field="note",
         text=body.note,
     )
@@ -133,15 +159,19 @@ async def add_note(case_id: str, body: NoteUpdate, request: Request):
     case = case_manager.add_note(case_id, body.note)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+    # The note text is deliberately absent from the entry: that a note was
+    # added is auditable, what it said is the case timeline's business.
+    _audit_case_write("PATCH /api/cases/{case_id}/note", case_id, ip)
     return case
 
 
 @router.patch("/cases/{case_id}/close")
 async def close_case(case_id: str, body: CloseRequest, request: Request):
     _require_key(request)
+    ip = client_ip(request)
     _enforce(
         limiter.check_case_write,
-        ip=client_ip(request),
+        ip=ip,
         field="resolution",
         text=body.resolution,
     )
@@ -149,6 +179,8 @@ async def close_case(case_id: str, body: CloseRequest, request: Request):
     case = case_manager.close_case(case_id, body.resolution)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+    # The resolution text is left out for the same reason as the note text.
+    _audit_case_write("PATCH /api/cases/{case_id}/close", case_id, ip)
     return case
 
 
