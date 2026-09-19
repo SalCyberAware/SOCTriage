@@ -15,8 +15,11 @@ _TEST_DB = os.path.join(tempfile.gettempdir(), "soctriage_pytest.db")
 os.environ["DATABASE_URL"] = "sqlite:///" + _TEST_DB.replace(os.sep, "/")
 
 import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
+from auth import API_KEY_HEADER  # noqa: E402
 from database import Base, engine  # noqa: E402
+from main import app  # noqa: E402
 from models import (  # noqa: E402
     EngineResult,
     EnrichmentResult,
@@ -25,6 +28,39 @@ from models import (  # noqa: E402
     Severity,
 )
 from services.case_manager import CaseManager  # noqa: E402
+
+# The key the suite presents on authenticated requests. Configured for every
+# test by the autouse fixture below, so a test that cares about the
+# unconfigured (fail-closed) case has to delete the variable deliberately.
+TEST_API_KEY = "test-api-key-not-a-real-secret"
+
+
+@pytest.fixture(autouse=True)
+def _configured_api_key(monkeypatch):
+    """Configure one accepted API key for the duration of each test.
+
+    auth.py reads the environment per call, so setting it here is enough; no
+    application object has to be rebuilt.
+    """
+    monkeypatch.setenv("SOCTRIAGE_API_KEYS", TEST_API_KEY)
+
+
+@pytest.fixture
+def client(_configured_api_key) -> TestClient:
+    """A TestClient that presents a valid API key on every request.
+
+    The default for the suite: the gated routes are a detail most tests should
+    not have to restate. httpx merges these defaults with per-request headers,
+    so a test can still add its own (x-forwarded-for, a different key) freely.
+    Tests that exercise the unauthenticated paths use ``anon_client``.
+    """
+    return TestClient(app, headers={API_KEY_HEADER: TEST_API_KEY})
+
+
+@pytest.fixture
+def anon_client() -> TestClient:
+    """A TestClient that presents no API key at all."""
+    return TestClient(app)
 
 
 @pytest.fixture(autouse=True)

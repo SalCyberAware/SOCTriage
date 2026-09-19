@@ -11,7 +11,6 @@ Two layers:
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from limits import (
     DEFAULT_DAILY_TRIAGE_CAP,
@@ -25,7 +24,6 @@ from limits import (
     build_limiter,
     client_ip,
 )
-from main import app
 from models import IOCType, Severity
 from routes import triage as triage_route
 
@@ -327,11 +325,6 @@ class TestBuildLimiter:
 
 
 # -- Route wiring -------------------------------------------------------------
-
-
-@pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
 
 
 @pytest.fixture

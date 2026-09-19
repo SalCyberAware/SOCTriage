@@ -10,19 +10,13 @@ through the same CaseManager the routes use.
 POST /api/triage is covered here too, with the outbound enrichment + AI
 calls monkeypatched so the route exercises end-to-end without touching
 ThreatScan or Anthropic.
-"""
-import pytest
-from fastapi.testclient import TestClient
 
-from main import app
+The ``client`` fixture (backend/conftest.py) presents a valid API key on every
+request, so the PATCH routes here exercise their behaviour rather than the
+gate in front of it. tests/test_auth.py covers the gate itself.
+"""
 from models import CaseStatus, IOCType, Severity
 from routes import triage as triage_route
-
-
-@pytest.fixture
-def client() -> TestClient:
-    """A TestClient bound to the real FastAPI app."""
-    return TestClient(app)
 
 
 def _open_case(manager, make_enrichment, make_report, *, ioc="8.8.8.8",

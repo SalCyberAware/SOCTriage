@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from auth import AuthRejectedError, require_api_key
 from limits import LimitRejectedError, build_limiter, client_ip
 from models import AlertIntake, CaseStatus, TriageResponse
 from services.ai_engine import generate_report
@@ -11,6 +12,33 @@ router = APIRouter(prefix="/api")
 
 # Single shared limiter for this instance. In-memory state; see limits.py.
 limiter = build_limiter()
+
+
+def _require_key(request: Request) -> None:
+    """Gate a write route on the API key, translating a rejection into a 401.
+
+    Called as the FIRST statement of every gated route, ahead of the limiter
+    and ahead of the case lookup. Ahead of the lookup because an unauthenticated
+    caller must not be able to tell a case id that exists from one that does
+    not: if the 404 came first, the route would be an oracle for enumerating
+    case ids eight hex characters at a time.
+
+    Ahead of the limiter because a 401 is the cheapest answer the service can
+    give -- one constant-time string compare, no shared state, no database --
+    so a rejected request touches nothing, not even the caller's rate-limit
+    allowance. That does leave key guessing unthrottled, which is a deliberate
+    trade: the guessing is bounded by the key's entropy (use a long random one;
+    see .env.example), and spending limiter state on requests that are already
+    refused would let an unauthenticated client push an authenticated one out
+    of its allowance.
+    """
+    try:
+        require_api_key(request)
+    except AuthRejectedError as rejected:
+        raise HTTPException(
+            status_code=rejected.status_code,
+            detail=rejected.message,
+        ) from rejected
 
 
 def _enforce(check, **kwargs) -> None:
@@ -82,6 +110,7 @@ async def get_case(case_id: str):
 
 @router.patch("/cases/{case_id}/status")
 async def update_status(case_id: str, body: StatusUpdate, request: Request):
+    _require_key(request)
     # No free text to cap: the body is a CaseStatus enum.
     _enforce(limiter.check_case_write, ip=client_ip(request))
 
@@ -93,6 +122,7 @@ async def update_status(case_id: str, body: StatusUpdate, request: Request):
 
 @router.patch("/cases/{case_id}/note")
 async def add_note(case_id: str, body: NoteUpdate, request: Request):
+    _require_key(request)
     _enforce(
         limiter.check_case_write,
         ip=client_ip(request),
@@ -108,6 +138,7 @@ async def add_note(case_id: str, body: NoteUpdate, request: Request):
 
 @router.patch("/cases/{case_id}/close")
 async def close_case(case_id: str, body: CloseRequest, request: Request):
+    _require_key(request)
     _enforce(
         limiter.check_case_write,
         ip=client_ip(request),

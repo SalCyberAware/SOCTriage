@@ -104,12 +104,15 @@ SOCTriage is a fast first-pass triage layer: paste an IOC, get enriched intel fr
 POST   /api/triage              Submit IOC for enrichment + AI report + case creation
 GET    /api/cases               List all cases
 GET    /api/cases/{id}          Get single case with full timeline
-PATCH  /api/cases/{id}/status   Update case status
-PATCH  /api/cases/{id}/note     Add analyst note
-PATCH  /api/cases/{id}/close    Close case with resolution
+PATCH  /api/cases/{id}/status   Update case status                 [API key]
+PATCH  /api/cases/{id}/note     Add analyst note                   [API key]
+PATCH  /api/cases/{id}/close    Close case with resolution         [API key]
 GET    /api/dashboard           Stats by status and severity
 GET    /health                  Health check
 ```
+
+`[API key]` marks the routes that require authentication — see
+[Authentication](#authentication) below. Everything else is open.
 
 ### Example Request
 
@@ -162,6 +165,87 @@ curl -X POST https://soctriage-production.up.railway.app/api/triage \
 
 ---
 
+## Authentication
+
+The three routes that **modify an existing case** require an API key. Everything
+else — `POST /api/triage`, all three reads, and `/health` — is open.
+
+| Endpoint | Key required? | Why |
+|----------|---------------|-----|
+| `POST /api/triage` | No | It's the public demo. Its cost is already bounded by the [abuse controls](backend/limits.py): a per-IP rate limit and a global daily cap on the one endpoint that spends Anthropic and ThreatScan quota. A key here would close the demo and close nothing else. |
+| `GET /api/cases`, `GET /api/cases/{id}`, `GET /api/dashboard` | No | Reads. They touch nothing but the local database and cost nothing per call. |
+| `PATCH /api/cases/{id}/status`, `/note`, `/close` | **Yes** | They mutate somebody else's investigation record. A case id is eight hex characters — guessable enough that "you need the id" is not a control. |
+| `GET /health` | No | Uptime monitoring. |
+
+### Using a key
+
+Send it in the `X-API-Key` header:
+
+```bash
+curl -X PATCH https://soctriage-production.up.railway.app/api/cases/4FA22FE3/status \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $SOCTRIAGE_API_KEY" \
+  -d '{"status": "in_progress"}'
+```
+
+A missing or wrong key returns `401` with a plain `detail` message and changes
+nothing. The check runs **before** the case lookup, so an unauthenticated
+caller gets the same 401 for a case id that exists and one that does not — the
+routes are not an oracle for enumerating case ids. It also runs before the rate
+limiter, so a refused request does not eat into anyone's allowance.
+
+### Configuring keys
+
+Set `SOCTRIAGE_API_KEYS` on the backend to one key, or to several separated by
+commas. Several exist so a key can be rotated with no window where none works:
+add the new one, move clients across, drop the old one.
+
+```bash
+# generate something worth having
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Keys are compared with `hmac.compare_digest`, not `==`. String equality returns
+as soon as two bytes differ, which leaks the length of the matching prefix
+through response timing; over enough samples that recovers a key one byte at a
+time. The comparison loop also does not stop at the first matching key, so the
+response time does not depend on which key was used.
+
+### It fails closed
+
+**With `SOCTRIAGE_API_KEYS` unset, the three PATCH routes return `401` to
+everyone.** They do not fall back to accepting unauthenticated writes.
+
+That is the inconvenient choice and it is deliberate. An auth check that
+disappears along with its configuration is not a control, because the case it
+has to survive is precisely a missing variable: a service moved between Railway
+projects, a variable dropped in a redeploy, `SOCTRIAGE_API_KEY` typed for
+`SOCTRIAGE_API_KEYS`. Fail-open turns every one of those into a silently
+world-writable API that still returns 200 and still looks healthy — the same
+shape of failure as the stale deploy that
+[deploy verification](.github/workflows/deploy-verify.yml) exists to catch,
+where every signal was green and the thing itself was broken. Fail-closed turns
+them into a 401 on the first write, which is loud, immediate, and honest.
+
+The cost is bounded and recoverable: a fresh clone cannot PATCH until it sets
+the variable, and the 401 body says exactly that. Nothing that makes the demo
+work is affected either way.
+
+### The hosted demo
+
+[soctriage.vercel.app](https://soctriage.vercel.app) ships **no API key**. A
+browser bundle cannot hold a secret — anything baked into it is readable by
+anyone who opens devtools — so the demo does not pretend to have one. In
+practice that means the **status buttons on the Cases tab are read-only on the
+public demo**: pressing one surfaces the 401 in the error banner instead of
+changing the case. Triage, the case list, the timeline and the dashboard all
+work exactly as before.
+
+To drive the write endpoints, use `curl`, a script, or your own deployment with
+the key set and a client that can keep it server-side.
+
+---
+
 ## Self-Hosting
 
 ### Prerequisites
@@ -191,7 +275,15 @@ THREATSCAN_API_URL=https://threatscan-production.up.railway.app/api
 FRONTEND_URL=http://localhost:5173
 ENV=development
 PORT=8080
+
+# Required for the three PATCH routes; they return 401 without it.
+# Comma-separate several values to rotate keys. See "Authentication" above.
+SOCTRIAGE_API_KEYS=generate_one_with_secrets.token_urlsafe
 ```
+
+The abuse-control variables (`SOCTRIAGE_IP_RATE`, `SOCTRIAGE_DAILY_TRIAGE_CAP`
+and the length caps) are all optional and documented in
+[`backend/.env.example`](backend/.env.example).
 
 ### Frontend Setup
 
@@ -212,6 +304,8 @@ npm run dev
 SOCTriage/
 ├── backend/
 │   ├── main.py              # FastAPI app, CORS, route registration
+│   ├── auth.py              # API key gate on the write endpoints
+│   ├── limits.py            # Rate limits, daily cap, length caps
 │   ├── models.py            # Pydantic data models
 │   ├── requirements.txt
 │   ├── Procfile             # Railway start command
