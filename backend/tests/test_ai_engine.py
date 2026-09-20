@@ -10,24 +10,61 @@ lets us exercise:
   carried-over enrichment fields,
 * the cosmetic-formatting paths Claude actually exhibits (markdown fences,
   string-shaped playbooks, missing/invalid severity), and
-* the failure paths -- the API raising, or returning a malformed response --
-  which must propagate to the caller rather than producing a fake report.
+* the failure paths -- the API raising, returning a malformed response, or
+  stopping at the max_tokens cap with the JSON half-written -- which must
+  propagate to the caller rather than producing a fake report.
+
+The fake responses are real ``anthropic.types.Message`` objects holding real
+``TextBlock``s, not duck-typed stand-ins. They are validated by the same
+pydantic models the SDK returns, so a future SDK release that changes the
+response shape breaks these tests instead of sailing through them. That
+matters most for the truncation path below, whose whole subject is the
+``stop_reason`` field.
 """
 import json
 from types import SimpleNamespace
 
 import pytest
+from anthropic.types import Message, TextBlock, Usage
 
 from models import AlertIntake, IOCType, Severity
 from services import ai_engine
-from services.ai_engine import generate_report
+from services.ai_engine import MAX_TOKENS, generate_report
 
 # ── test helpers ─────────────────────────────────────────────────────────────
 
 
-def _fake_message(text: str) -> SimpleNamespace:
-    """Build the minimum shape ai_engine reads: ``message.content[0].text``."""
-    return SimpleNamespace(content=[SimpleNamespace(text=text)])
+def _fake_message(text: str, *, stop_reason: str = "end_turn") -> Message:
+    """Build a real ``Message``, the way the SDK actually returns one.
+
+    Verified against a live call on anthropic 1.7.0: a normal reply is a single
+    ``TextBlock`` with ``stop_reason="end_turn"``. ``stop_reason="max_tokens"``
+    is the truncated case.
+    """
+    return Message(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-sonnet-4-6",
+        content=[TextBlock(type="text", text=text)],
+        stop_reason=stop_reason,
+        stop_sequence=None,
+        usage=Usage(input_tokens=332, output_tokens=1500),
+    )
+
+
+def _empty_message() -> Message:
+    """A real ``Message`` carrying no content blocks."""
+    return Message(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-sonnet-4-6",
+        content=[],
+        stop_reason="end_turn",
+        stop_sequence=None,
+        usage=Usage(input_tokens=332, output_tokens=0),
+    )
 
 
 def _install_client(monkeypatch, handler):
@@ -265,7 +302,7 @@ def test_generate_report_raises_on_empty_content(monkeypatch, make_enrichment):
     """An Anthropic message with no content blocks is unrecoverable."""
     _install_client(
         monkeypatch,
-        lambda **_: SimpleNamespace(content=[]),
+        lambda **_: _empty_message(),
     )
 
     import asyncio
@@ -287,3 +324,120 @@ def test_generate_report_raises_on_malformed_mitre_technique(
     import asyncio
     with pytest.raises(ValidationError):
         asyncio.run(generate_report(make_enrichment(), _alert()))
+
+
+# ── truncation at the max_tokens cap ─────────────────────────────────────────
+#
+# A live call on 2026-09-19 produced a 1,500-token report against the old
+# 2,000-token cap. A slightly longer incident would have been cut off
+# mid-JSON, and the only symptom was a JSONDecodeError from the parse, which
+# names neither the cap nor the truncation and reaches the caller as a bare
+# 500. These tests pin the clear error and the ordering that produces it.
+
+
+def test_generate_report_raises_a_clear_error_when_truncated_at_the_cap(
+    monkeypatch, make_enrichment
+):
+    """A max_tokens stop names the cap and the cause, not a parse failure."""
+    # What the API actually returns when it runs out of room: a well-formed
+    # text block holding JSON that simply stops partway through.
+    truncated = '{"title": "Suspicious outbound", "severity": "hi'
+    _install_client(
+        monkeypatch,
+        lambda **_: _fake_message(truncated, stop_reason="max_tokens"),
+    )
+
+    import asyncio
+    with pytest.raises(ValueError) as info:
+        asyncio.run(generate_report(make_enrichment(), _alert()))
+
+    detail = str(info.value)
+    assert str(MAX_TOKENS) in detail          # names the cap that was hit
+    assert "truncated" in detail              # names what went wrong
+    assert "MAX_TOKENS" in detail             # names the knob to turn
+
+
+def test_truncation_error_is_not_a_json_decode_error(monkeypatch, make_enrichment):
+    """The whole point: the operator gets a diagnosis, not a parser stack trace."""
+    _install_client(
+        monkeypatch,
+        lambda **_: _fake_message('{"title": "cut off he', stop_reason="max_tokens"),
+    )
+
+    import asyncio
+    with pytest.raises(ValueError) as info:
+        asyncio.run(generate_report(make_enrichment(), _alert()))
+
+    assert not isinstance(info.value, json.JSONDecodeError)
+
+
+def test_truncation_is_detected_before_the_json_is_parsed(
+    monkeypatch, make_enrichment
+):
+    """The check reads stop_reason, it does not merely catch a failed parse.
+
+    The payload here is complete, valid JSON that would parse into a perfectly
+    good report. Because the API reported a max_tokens stop, it must still be
+    refused: a response the model did not finish writing cannot be trusted to
+    be the whole report just because the prefix happens to parse.
+    """
+    complete_json = json.dumps(_claude_payload())
+    _install_client(
+        monkeypatch,
+        lambda **_: _fake_message(complete_json, stop_reason="max_tokens"),
+    )
+
+    import asyncio
+    with pytest.raises(ValueError, match="truncated"):
+        asyncio.run(generate_report(make_enrichment(), _alert()))
+
+
+def test_a_complete_response_at_end_turn_still_parses(monkeypatch, make_enrichment):
+    """The guard must not reject the normal path it sits in front of."""
+    payload = _claude_payload()
+    _install_client(
+        monkeypatch,
+        lambda **_: _fake_message(json.dumps(payload), stop_reason="end_turn"),
+    )
+
+    import asyncio
+    report = asyncio.run(generate_report(make_enrichment(), _alert()))
+
+    assert report.title == payload["title"]
+    assert report.severity is Severity.HIGH
+
+
+def test_malformed_json_at_end_turn_still_raises_a_parse_error(
+    monkeypatch, make_enrichment
+):
+    """Output the model did finish, but that is not JSON, is a different fault.
+
+    Pins that the new guard did not over-catch: only a max_tokens stop is
+    reported as truncation.
+    """
+    _install_client(
+        monkeypatch,
+        lambda **_: _fake_message("Sorry, I cannot help.", stop_reason="end_turn"),
+    )
+
+    import asyncio
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(generate_report(make_enrichment(), _alert()))
+
+
+def test_generate_report_requests_the_raised_cap(monkeypatch, make_enrichment):
+    """The call sends MAX_TOKENS, and MAX_TOKENS has real headroom."""
+    captured = _install_client(
+        monkeypatch,
+        lambda **_: _fake_message(json.dumps(_claude_payload())),
+    )
+
+    import asyncio
+    asyncio.run(generate_report(make_enrichment(), _alert()))
+
+    assert captured["kwargs"]["max_tokens"] == MAX_TOKENS
+    # 1,500 output tokens is the measured size of a richly populated report
+    # (5 MITRE techniques, 7 actions, 7 playbook steps) from the live call on
+    # 2026-09-19. The cap must leave room for several times that, not 500
+    # tokens as the old 2,000 did.
+    assert MAX_TOKENS >= 1500 * 4
