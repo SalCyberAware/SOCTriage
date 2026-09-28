@@ -7,7 +7,12 @@ httpx==0.28.1
 python-dotenv==1.2.2
 anthropic==1.7.0
 pydantic==2.9.2
-sqlalchemy>=2.0.30
+# Held on the 2.0 line. SQLAlchemy 2.1 changed the default driver for a bare
+# postgresql:// URL from psycopg2 to psycopg (v3), which is not installed, and
+# picking up 2.1 through this once-unpinned line took production down.
+# database.py now names psycopg2 in the URL explicitly; moving to 2.1 is a
+# deliberate upgrade to read the migration notes for, not a range bump.
+sqlalchemy>=2.0.30,<2.1
 psycopg2-binary>=2.9.10
 # Schema migrations. See docs/MIGRATIONS.md.
 alembic==1.20.0

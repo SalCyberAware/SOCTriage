@@ -25,10 +25,16 @@ def _resolve_database_url() -> str:
     if not url:
         # Local development: no DATABASE_URL set -> use a SQLite file.
         return "sqlite:///./soctriage.db"
-    # Railway (like Heroku) hands out the legacy "postgres://" scheme;
-    # SQLAlchemy 2.x requires "postgresql://".
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
+    # Railway (like Heroku) hands out the legacy "postgres://" scheme, which
+    # SQLAlchemy 2.x rejects. Name the driver explicitly as well: a bare
+    # "postgresql://" means whatever SQLAlchemy's default Postgres driver is,
+    # and that changed from psycopg2 to psycopg (v3) in SQLAlchemy 2.1. Only
+    # psycopg2-binary is installed, so relying on the default took production
+    # down. A URL that already names a driver is left alone.
+    for bare in ("postgres://", "postgresql://"):
+        if url.startswith(bare):
+            url = "postgresql+psycopg2://" + url[len(bare):]
+            break
     return url
 
 
@@ -36,7 +42,10 @@ DATABASE_URL = _resolve_database_url()
 _IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
 # SQLite needs check_same_thread=False to be usable across the server's threads.
-_connect_args = {"check_same_thread": False} if _IS_SQLITE else {}
+# For Postgres, bound the connection attempt: libpq's default is to wait
+# indefinitely, so an unreachable database would hang init_db() -- and with it
+# startup -- instead of failing and letting the platform restart the service.
+_connect_args: dict = {"check_same_thread": False} if _IS_SQLITE else {"connect_timeout": 10}
 
 engine = create_engine(DATABASE_URL, connect_args=_connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)

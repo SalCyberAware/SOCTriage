@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Backend crashed on startup against Postgres** after SQLAlchemy 2.1 was picked up through the unpinned `sqlalchemy>=2.0.30`. SQLAlchemy 2.1 maps a bare `postgresql://` URL to psycopg (v3), and only `psycopg2-binary` is installed. `database.py` now rewrites both `postgres://` and `postgresql://` to `postgresql+psycopg2://`, so the driver no longer depends on SQLAlchemy's default, and `requirements.txt` holds SQLAlchemy below 2.1. Postgres connections also carry a 10 second `connect_timeout`, so an unreachable database fails startup instead of hanging it.
+
 ### Added
 
 - **Alembic schema migrations** (`backend/alembic/`, [docs/MIGRATIONS.md](docs/MIGRATIONS.md)). The schema is now versioned instead of built by `Base.metadata.create_all()`, which could create tables but never change one. Startup upgrades the database to head. A database created before this change already matches the baseline migration (`0001`), so it is stamped at that revision rather than rebuilt, and keeps its rows. `alembic/env.py` takes its URL from `database.DATABASE_URL`, so the CLI and the app always target the same database. A new CI job runs every migration from an empty Postgres to head, runs `alembic check` to catch drift between the models and the migrations, downgrades to empty and back, and then runs the test suite against that database. The test suite itself now builds its schema from the migrations too. Closes #1.
