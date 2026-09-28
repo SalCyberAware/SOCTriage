@@ -53,6 +53,15 @@ updates:
     commit-message:
       prefix: "chore(deps)"
       prefix-development: "chore(deps-dev)"
+    # SQLAlchemy is held on the 2.0 line. 2.1 changed the default driver for a
+    # bare postgresql:// URL to psycopg (v3), which is not installed, and taking
+    # 2.1 through an unpinned range took production down. See the "Backend
+    # crashed on startup against Postgres" entry under [Unreleased] > Fixed in
+    # CHANGELOG.md. Moving to 2.1 is a deliberate upgrade made together with
+    # the driver change, so remove this rule as part of that work.
+    ignore:
+      - dependency-name: "sqlalchemy"
+        versions: [">=2.1"]
     groups:
       backend-minor-and-patch:
         applies-to: version-updates
