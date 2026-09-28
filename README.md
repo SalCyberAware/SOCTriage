@@ -44,7 +44,7 @@ Note that the hosted demo ships no API key, so the Cases tab is read-only there.
 - **Severity Scoring.** LOW / MEDIUM / HIGH / CRITICAL based on weighted engine results, on a 0 to 100 scale
 - **Response Playbook.** Step-by-step containment, investigation, eradication, and recovery guidance tailored to the specific threat
 - **Case Management.** Cases are opened automatically with full timeline logging; status can be updated (OPEN, IN_PROGRESS, ESCALATED, CLOSED)
-- **Persistent storage.** Cases live in PostgreSQL in production and in a local SQLite file for development, so they survive restarts
+- **Persistent storage.** Cases live in PostgreSQL in production and in a local SQLite file for development, so they survive restarts. The schema is managed by Alembic migrations, applied automatically on startup. See [docs/MIGRATIONS.md](docs/MIGRATIONS.md)
 - **Dashboard.** Live stats by case status and severity
 - **API key authentication.** The three routes that modify an existing case require a key; triage and the reads stay open. See [Authentication](#authentication)
 - **Audit logging.** Every write records who did what, as one structured line per event. See [Audit Logging](#audit-logging)
@@ -61,8 +61,8 @@ Note that the hosted demo ships no API key, so the Cases tab is read-only there.
 | AI Engine | Anthropic Claude API |
 | Enrichment | ThreatScan API (11 engines) |
 | Data Models | Pydantic v2 |
-| Database | PostgreSQL in production, SQLite locally, via SQLAlchemy 2.x |
-| Backend tests | pytest, 230 tests, 99% line coverage |
+| Database | PostgreSQL in production, SQLite locally, via SQLAlchemy 2.x, schema versioned with Alembic |
+| Backend tests | pytest, 241 tests, 99% line coverage |
 | Frontend tests | vitest + React Testing Library, 18 specs |
 | CI | GitHub Actions: tests, lint, types, security scanning, deploy verification |
 
@@ -444,7 +444,7 @@ The same five things CI runs:
 
 ```bash
 cd backend
-pytest                                      # 230 tests
+pytest                                      # 241 tests
 pytest --cov=. --cov-report=term-missing    # with coverage, as CI runs it
 ruff check .
 mypy
@@ -461,17 +461,23 @@ npm run build
 
 ```
 SOCTriage/
+├── docs/
+│   └── MIGRATIONS.md              # Creating and applying schema migrations
 ├── .github/
 │   ├── dependabot.yml             # Dependency update proposals
 │   └── workflows/
-│       ├── backend-tests.yml      # pytest + coverage upload to Codecov
+│       ├── backend-tests.yml      # pytest + Codecov; migrations and tests on Postgres
 │       ├── backend-quality.yml    # ruff and mypy
 │       ├── frontend.yml           # eslint, vite build, vitest
 │       ├── security.yml           # pip-audit, npm audit, gitleaks, CodeQL
 │       └── deploy-verify.yml      # Confirms both surfaces serve the pushed commit
 ├── backend/
 │   ├── main.py                    # FastAPI app, CORS, route registration, /health
-│   ├── database.py                # SQLAlchemy engine, cases table, init_db()
+│   ├── database.py                # SQLAlchemy engine, cases table, init_db() (migrates to head)
+│   ├── alembic.ini                # Alembic config; the URL comes from database.py
+│   ├── alembic/
+│   │   ├── env.py                 # Reads DATABASE_URL the way the app does
+│   │   └── versions/              # One file per migration, 0001 is the baseline
 │   ├── models.py                  # Pydantic data models
 │   ├── auth.py                    # API key gate on the three PATCH routes
 │   ├── audit.py                   # Structured audit trail for every write
@@ -483,13 +489,14 @@ SOCTriage/
 │   │   ├── enrichment.py          # ThreatScan integration, IOC type detection
 │   │   ├── ai_engine.py           # Claude incident report generation
 │   │   └── case_manager.py        # Case persistence and timeline, via SQLAlchemy
-│   ├── tests/                     # 230 tests
+│   ├── tests/                     # 241 tests
 │   │   ├── test_ai_engine.py
 │   │   ├── test_audit.py
 │   │   ├── test_auth.py
 │   │   ├── test_case_manager.py
 │   │   ├── test_enrichment.py
 │   │   ├── test_limits.py
+│   │   ├── test_migrations.py
 │   │   └── test_triage_routes.py
 │   ├── requirements.txt           # Runtime dependencies
 │   ├── requirements-dev.txt       # Runtime + pytest, pytest-cov, ruff, mypy
@@ -519,6 +526,7 @@ SOCTriage/
 ### Shipped since 1.0.0
 
 - [x] **PostgreSQL persistence**, replacing the in-memory case store
+- [x] **Alembic migrations**: the schema is versioned, applied on startup, and exercised on Postgres in CI
 - [x] **Abuse controls** on the write endpoints: per-IP rate limit, daily cap on triage, length caps
 - [x] **API key authentication** on the three case-mutating PATCH routes
 - [x] **Audit logging** of every write
@@ -565,4 +573,4 @@ MIT. Free to use, modify, and distribute.
 
 ---
 
-_Status (September 2026): the backend is database-backed, with a 230-test pytest suite at 99% line coverage plus ruff and mypy, and an 18-spec vitest suite on the frontend, all running on GitHub Actions. The write endpoints are API-key authenticated and audit-logged. The frontend auto-deploys to Vercel, and every push is checked to confirm both surfaces are actually serving the pushed commit._
+_Status (September 2026): the backend is database-backed, with a 241-test pytest suite at 99% line coverage plus ruff and mypy, and an 18-spec vitest suite on the frontend, all running on GitHub Actions. The write endpoints are API-key authenticated and audit-logged. The frontend auto-deploys to Vercel, and every push is checked to confirm both surfaces are actually serving the pushed commit._

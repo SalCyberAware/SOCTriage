@@ -15,7 +15,7 @@ from routes.triage import router as triage_router  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create database tables if they do not yet exist, then hand off to the app.
+    # Migrate the database to the newest schema, then hand off to the app.
     init_db()
     yield
 

@@ -41,3 +41,73 @@ jobs:
           files: ./backend/coverage.xml
           flags: backend
           fail_ci_if_error: false
+
+  migrations-postgres:
+    name: Migrations and tests on Postgres
+    runs-on: ubuntu-latest
+
+    # Production runs on Postgres; the job above runs on SQLite. This one builds
+    # the schema the way production does -- Alembic, from an empty database to
+    # head -- and then runs the whole suite against that schema.
+    services:
+      postgres:
+        # Keep the major version in step with the Railway Postgres service.
+        image: postgres:16
+        env:
+          POSTGRES_USER: soctriage
+          POSTGRES_DB: soctriage_ci
+          # No password at all rather than a placeholder one: the service is
+          # reachable only from this job and gone when it ends.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U soctriage -d soctriage_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # A throwaway database that exists only for the length of this job.
+      DATABASE_URL: postgresql://soctriage@localhost:5432/soctriage_ci
+      SOCTRIAGE_TEST_DATABASE_URL: postgresql://soctriage@localhost:5432/soctriage_ci
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Keep in sync with backend/runtime.txt.
+          python-version: '3.11.9'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Migrate an empty database to head
+        run: alembic upgrade head
+
+      # Fails if autogenerate would produce anything, i.e. if the models and
+      # the migrations disagree about the schema.
+      - name: Check the models match the migrations
+        run: alembic check
+
+      # Every downgrade must actually work, or it cannot be relied on in an
+      # incident. Ends back at head for the tests.
+      - name: Round-trip every migration down to empty and back up
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+          alembic current | grep -q "(head)"
+
+      - name: Run pytest against the migrated database
+        run: pytest

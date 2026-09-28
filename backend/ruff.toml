@@ -25,3 +25,9 @@ ignore = [
 # margin would change the bytes the model receives, and a noqa comment cannot
 # go on that line without landing inside the f-string itself.
 "services/ai_engine.py" = ["E501"]
+
+[lint.isort]
+# backend/alembic/ (the migrations directory) shadows the name, so without this
+# ruff sorts `from alembic import op` as first-party and `alembic.config` as
+# third-party. It is the installed package either way.
+known-third-party = ["alembic"]

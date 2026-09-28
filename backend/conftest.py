@@ -3,7 +3,16 @@
 database.py builds the SQLAlchemy engine at import time from the DATABASE_URL
 environment variable. To keep the tests off the real database, this file points
 DATABASE_URL at a throwaway SQLite file *before* any application module is
-imported. Every test then runs against freshly created, empty tables.
+imported. Every test then runs against empty tables.
+
+The schema comes from the Alembic migrations, the same way it does in
+production, not from Base.metadata.create_all(): the session starts by
+migrating to head, so a migration that drifts from the models fails the suite.
+
+SOCTRIAGE_TEST_DATABASE_URL, when set, is used instead of the SQLite file. CI
+points it at a Postgres service so the suite also runs against the production
+engine. Every table's rows are deleted between tests, so never point it at a
+database whose data matters.
 """
 import os
 import tempfile
@@ -12,13 +21,21 @@ from datetime import UTC, datetime
 # Point the app at a throwaway SQLite database BEFORE importing anything that
 # reads DATABASE_URL -- database.py resolves it at import time.
 _TEST_DB = os.path.join(tempfile.gettempdir(), "soctriage_pytest.db")
-os.environ["DATABASE_URL"] = "sqlite:///" + _TEST_DB.replace(os.sep, "/")
+_EXTERNAL_TEST_DB_URL = os.getenv("SOCTRIAGE_TEST_DATABASE_URL", "").strip()
+if _EXTERNAL_TEST_DB_URL:
+    os.environ["DATABASE_URL"] = _EXTERNAL_TEST_DB_URL
+else:
+    # Start from an empty file so a schema left by an earlier run, possibly
+    # from a different migration history, never leaks into this one.
+    if os.path.exists(_TEST_DB):
+        os.remove(_TEST_DB)
+    os.environ["DATABASE_URL"] = "sqlite:///" + _TEST_DB.replace(os.sep, "/")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from auth import API_KEY_HEADER  # noqa: E402
-from database import Base, engine  # noqa: E402
+from database import Base, engine, init_db  # noqa: E402
 from main import app  # noqa: E402
 from models import (  # noqa: E402
     EngineResult,
@@ -63,13 +80,26 @@ def anon_client() -> TestClient:
     return TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def clean_db():
-    """Give every test a fresh, empty set of tables."""
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+@pytest.fixture(scope="session", autouse=True)
+def _migrated_db():
+    """Bring the test database to the newest migration, once per session."""
+    init_db()
     yield
-    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+
+
+def _delete_all_rows() -> None:
+    with engine.begin() as connection:
+        for table in reversed(Base.metadata.sorted_tables):
+            connection.execute(table.delete())
+
+
+@pytest.fixture(autouse=True)
+def clean_db(_migrated_db):
+    """Give every test empty tables, on the migrated schema."""
+    _delete_all_rows()
+    yield
+    _delete_all_rows()
 
 
 @pytest.fixture

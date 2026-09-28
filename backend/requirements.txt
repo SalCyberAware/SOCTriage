@@ -9,3 +9,5 @@ anthropic==1.7.0
 pydantic==2.9.2
 sqlalchemy>=2.0.30
 psycopg2-binary>=2.9.10
+# Schema migrations. See docs/MIGRATIONS.md.
+alembic==1.20.0

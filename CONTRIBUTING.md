@@ -77,7 +77,9 @@ VITE_API_KEY=the_same_value_as_SOCTRIAGE_API_KEYS
 
 The backend uses **SQLAlchemy 2.x** with a single `cases` table that stores scalar fields (status, severity, timestamps) as columns and nested enrichment / report / timeline objects as JSON. Both PostgreSQL and SQLite handle this natively.
 
-There is no Alembic migration step. `database.init_db()` calls `Base.metadata.create_all()` on application startup, which is safe to run repeatedly. Schema changes today mean editing [`backend/database.py`](backend/database.py) and dropping the local SQLite file, or running an ad-hoc `ALTER TABLE` against your Postgres. Alembic can be added once the schema starts shipping breaking changes.
+The schema is managed by **Alembic** migrations in [`backend/alembic/versions/`](backend/alembic/versions). `database.init_db()` upgrades the database to head on application startup, so a deploy applies new migrations by itself, and `alembic upgrade head` does the same by hand against the database `DATABASE_URL` names.
+
+A schema change is a model change in [`backend/database.py`](backend/database.py) plus a migration generated with `alembic revision --autogenerate` and then read line by line. Never edit a migration once it is on `main`, and never call `create_all()` against a real database. The full workflow is in [docs/MIGRATIONS.md](docs/MIGRATIONS.md).
 
 ## Running Locally
 
@@ -102,7 +104,7 @@ CI runs five workflows. All of them can be run locally:
 ```bash
 # Backend tests
 cd backend
-pytest                                      # full suite, 230 tests
+pytest                                      # full suite, 241 tests
 pytest --cov=. --cov-report=term-missing    # with coverage, as CI runs it
 
 # Backend quality
@@ -116,7 +118,7 @@ npm test                                    # vitest, 18 specs
 npm run build                               # vite build
 ```
 
-The backend suite is 230 tests at **99% line coverage**, reported to Codecov on
+The backend suite is 241 tests at **99% line coverage**, reported to Codecov on
 every push to `main`; the badge in the README links to the live report.
 
 The two remaining workflows need no local equivalent. **Security** runs
@@ -134,19 +136,22 @@ The backend is organized so each kind of change has an obvious home:
 | A new enrichment source | [`backend/services/enrichment.py`](backend/services/enrichment.py). See how it calls the ThreatScan API and shapes the result into an `EnrichmentResult` |
 | A change to the AI report shape | The Pydantic models in [`backend/models.py`](backend/models.py) and the prompt + parsing in [`backend/services/ai_engine.py`](backend/services/ai_engine.py) |
 | Case workflow / status transitions | [`backend/services/case_manager.py`](backend/services/case_manager.py). Opens, updates, and persists cases via SQLAlchemy sessions |
-| A new persisted field on a case | A new column on `CaseRow` in [`backend/database.py`](backend/database.py); update the case-manager methods and the response models in `models.py` |
+| A new persisted field on a case | A new column on `CaseRow` in [`backend/database.py`](backend/database.py) and a migration for it (see [docs/MIGRATIONS.md](docs/MIGRATIONS.md)); update the case-manager methods and the response models in `models.py` |
 | Authentication on a route | [`backend/auth.py`](backend/auth.py), then call `_require_key(request)` as the first statement of the handler, ahead of the limiter and the case lookup |
 | A new abuse control | [`backend/limits.py`](backend/limits.py). Add the check to `Limiter`, wire it through `build_limiter()`, and document the variable in `.env.example` |
 | A new audited action | [`backend/audit.py`](backend/audit.py). Note that entries carry no free text and no key material, and adding a field means changing `ENTRY_FIELDS` deliberately |
 
 Every service has a focused test file under [`backend/tests/`](backend/tests/):
 `test_enrichment.py`, `test_ai_engine.py`, `test_case_manager.py`,
-`test_triage_routes.py`, `test_limits.py`, `test_auth.py`, `test_audit.py`.
+`test_triage_routes.py`, `test_limits.py`, `test_auth.py`, `test_audit.py`,
+`test_migrations.py`.
 When adding a new service or route, add a matching `test_<thing>.py`. The suite
 has tight coverage today and the bar is to keep it there.
 
 Shared fixtures live in [`backend/conftest.py`](backend/conftest.py), including
-the throwaway SQLite database every test runs against, a `client` fixture that
+the throwaway SQLite database every test runs against (built by running the
+migrations, not `create_all()`; set `SOCTRIAGE_TEST_DATABASE_URL` to use a
+Postgres instead, as CI does), a `client` fixture that
 presents a valid API key, and an `anon_client` fixture that presents none.
 
 ## Commit Conventions

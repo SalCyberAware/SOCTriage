@@ -13,8 +13,9 @@ both handle JSON natively, so the same code works against either backend.
 """
 import os
 from datetime import datetime
+from pathlib import Path
 
-from sqlalchemy import JSON, DateTime, String, Text, create_engine
+from sqlalchemy import JSON, DateTime, String, Text, create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -69,6 +70,38 @@ class CaseRow(Base):
     timeline: Mapped[list] = mapped_column(JSON, default=list)
 
 
+_BACKEND_DIR = Path(__file__).resolve().parent
+
+# The first migration: the schema exactly as create_all() built it before
+# Alembic was introduced. See alembic/versions/0001_baseline_cases_table.py.
+BASELINE_REVISION = "0001"
+
+
 def init_db() -> None:
-    """Create any missing tables. Safe to call on every application startup."""
-    Base.metadata.create_all(bind=engine)
+    """Upgrade the database to the newest migration. Safe on every startup.
+
+    The schema is owned by the Alembic migrations in alembic/versions, not by
+    Base.metadata.create_all(). Three starting points all end at head:
+
+    - empty database: every migration runs, from the baseline up.
+    - database from before migrations existed (it has the `cases` table that
+      create_all() made, but no alembic_version table): it already matches the
+      baseline, so it is stamped at the baseline and only later migrations run.
+      Stamping rather than running the baseline is what keeps its rows intact.
+    - migrated database: only migrations it has not yet seen run; at head,
+      nothing does.
+    """
+    # Imported here so that importing database (every module that touches a
+    # case does) does not pull in the migration machinery.
+    from alembic import command
+    from alembic.config import Config
+
+    with engine.begin() as connection:
+        config = Config(str(_BACKEND_DIR / "alembic.ini"))
+        config.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
+        config.attributes["connection"] = connection
+
+        tables = set(inspect(connection).get_table_names())
+        if "cases" in tables and "alembic_version" not in tables:
+            command.stamp(config, BASELINE_REVISION)
+        command.upgrade(config, "head")
