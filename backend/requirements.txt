@@ -1,12 +1,12 @@
 fastapi==0.141.1
-uvicorn==0.30.6
+uvicorn==0.53.0
 # Used directly by services/enrichment.py for the ThreatScan calls, and by
 # starlette's TestClient (which caps it below 0.29). NOT the Anthropic SDK's
 # HTTP layer: anthropic 1.x runs on httpx2, which arrives transitively.
 httpx==0.28.1
-python-dotenv==1.2.2
-anthropic==1.7.0
-pydantic==2.9.2
+python-dotenv==1.2.3
+anthropic==1.8.0
+pydantic==2.13.5
 # Held on the 2.0 line. SQLAlchemy 2.1 changed the default driver for a bare
 # postgresql:// URL from psycopg2 to psycopg (v3), which is not installed, and
 # picking up 2.1 through this once-unpinned line took production down.
