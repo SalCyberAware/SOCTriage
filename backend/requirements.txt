@@ -12,7 +12,7 @@ pydantic==2.9.2
 # picking up 2.1 through this once-unpinned line took production down.
 # database.py now names psycopg2 in the URL explicitly; moving to 2.1 is a
 # deliberate upgrade to read the migration notes for, not a range bump.
-sqlalchemy>=2.0.30,<2.1
+sqlalchemy>=2.1.0,<2.2
 psycopg2-binary>=2.9.10
 # Schema migrations. See docs/MIGRATIONS.md.
 alembic==1.20.0
