@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python
         # 3.11.9 to match backend/runtime.txt and backend-tests.yml, so the
@@ -76,7 +76,7 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Node
         # No frontend job exists in backend-tests.yml to match, so this picks the
@@ -118,7 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository with full history
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # A secret that was committed and later deleted is still in the history
           # and still compromised. The default shallow clone would scan only the
@@ -164,7 +164,7 @@ jobs:
         language: ["python", "javascript-typescript"]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
