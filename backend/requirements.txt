@@ -1,5 +1,5 @@
 fastapi==0.141.1
-uvicorn==0.53.0
+uvicorn==0.54.0
 # Used directly by services/enrichment.py for the ThreatScan calls, and by
 # starlette's TestClient (which caps it below 0.29). NOT the Anthropic SDK's
 # HTTP layer: anthropic 1.x runs on httpx2, which arrives transitively.
