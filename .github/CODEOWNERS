@@ -1,0 +1,23 @@
+# Code owners for SOCTriage.
+#
+# Later patterns take precedence over earlier ones. Every path resolves to the
+# same owner today; the explicit entries below mark the areas that need a
+# deliberate review rather than a skim, and give a single place to add a
+# second reviewer for them later.
+
+# Default owner for everything in the repository.
+*                                   @SalCyberAware
+
+# CI workflows, Dependabot, templates and this file.
+/.github/                           @SalCyberAware
+
+# Dependency manifests and lockfiles. A change here alters what ships.
+/backend/requirements.txt           @SalCyberAware
+/backend/requirements-dev.txt       @SalCyberAware
+/frontend/package.json              @SalCyberAware
+/frontend/package-lock.json         @SalCyberAware
+
+# Database migrations. These run against production Postgres on deploy and
+# are hard to undo, so they need a deliberate review.
+/backend/alembic/                   @SalCyberAware
+/backend/alembic.ini                @SalCyberAware

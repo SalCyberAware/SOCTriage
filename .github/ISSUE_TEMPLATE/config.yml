@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/SalCyberAware/SOCTriage/security/advisories/new
+    about: Please do not open a public issue for security problems. Report them privately through GitHub private vulnerability reporting.
+  - name: Security policy
+    url: https://github.com/SalCyberAware/SOCTriage/blob/main/SECURITY.md
+    about: What is in scope, how reports are handled and expected response times.

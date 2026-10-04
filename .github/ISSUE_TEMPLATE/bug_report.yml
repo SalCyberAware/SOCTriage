@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in SOCTriage is not working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+        **Security issues do not belong here.** Report them privately through
+        [private vulnerability reporting](https://github.com/SalCyberAware/SOCTriage/security/advisories/new).
+        Never paste API keys, tokens or other secrets into an issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, including the IOC type used (IP, domain, URL or hash) if relevant.
+      placeholder: |
+        1. Go to ...
+        2. Submit ...
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it happen?
+      options:
+        - Live demo (soctriage.vercel.app)
+        - Local backend
+        - Local frontend
+        - CI or deployment
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit SHA or version
+      description: The commit you were running, if known. The backend reports it at /health.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Redact any keys, tokens or personal data before pasting.
+      render: shell

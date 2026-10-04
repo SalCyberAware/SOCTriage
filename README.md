@@ -2,7 +2,11 @@
 
 **AI-powered SOC alert triage assistant. A free, open-source alternative to enterprise SOAR platforms.**
 
-[![Backend tests](https://img.shields.io/github/actions/workflow/status/SalCyberAware/SOCTriage/backend-tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/SalCyberAware/SOCTriage/actions/workflows/backend-tests.yml)
+[![Backend quality](https://img.shields.io/github/actions/workflow/status/SalCyberAware/SOCTriage/backend-quality.yml?branch=main&label=backend%20quality&style=flat-square)](https://github.com/SalCyberAware/SOCTriage/actions/workflows/backend-quality.yml)
+[![Backend tests](https://img.shields.io/github/actions/workflow/status/SalCyberAware/SOCTriage/backend-tests.yml?branch=main&label=backend%20tests&style=flat-square)](https://github.com/SalCyberAware/SOCTriage/actions/workflows/backend-tests.yml)
+[![Frontend](https://img.shields.io/github/actions/workflow/status/SalCyberAware/SOCTriage/frontend.yml?branch=main&label=frontend&style=flat-square)](https://github.com/SalCyberAware/SOCTriage/actions/workflows/frontend.yml)
+[![Security](https://img.shields.io/github/actions/workflow/status/SalCyberAware/SOCTriage/security.yml?branch=main&label=security&style=flat-square)](https://github.com/SalCyberAware/SOCTriage/actions/workflows/security.yml)
+[![Deploy verification](https://img.shields.io/github/actions/workflow/status/SalCyberAware/SOCTriage/deploy-verify.yml?branch=main&label=deploy%20verification&style=flat-square)](https://github.com/SalCyberAware/SOCTriage/actions/workflows/deploy-verify.yml)
 [![codecov](https://img.shields.io/codecov/c/github/SalCyberAware/SOCTriage?style=flat-square&label=coverage&logo=codecov&logoColor=white)](https://codecov.io/gh/SalCyberAware/SOCTriage)
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-soctriage.vercel.app-00d4aa?style=flat-square)](https://soctriage.vercel.app)
 [![Backend](https://img.shields.io/badge/Backend-Railway-6366f1?style=flat-square)](https://soctriage-production.up.railway.app/health)

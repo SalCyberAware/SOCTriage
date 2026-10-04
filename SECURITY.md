@@ -13,7 +13,7 @@ Only the `main` branch receives security fixes. There are no maintenance branche
 
 ## Reporting a Vulnerability
 
-Please report security issues privately via **[GitHub Security Advisories](https://github.com/SalCyberAware/SOCTriage/security/advisories/new)** — do not open a public issue, and do not include exploit details in a PR description.
+Please report security issues privately using **GitHub private vulnerability reporting**: open the repository's [Security tab](https://github.com/SalCyberAware/SOCTriage/security) and choose **Report a vulnerability**, or go straight to [the reporting form](https://github.com/SalCyberAware/SOCTriage/security/advisories/new). Do not open a public issue, and do not include exploit details in a PR description.
 
 When reporting, please include:
 
