@@ -37,6 +37,7 @@ If you don't hear back within 5 business days, please ping the advisory thread.
 Issues that meaningfully affect the security of the backend, frontend, or persisted data:
 
 - **Authentication or authorization bypass** on any current or future protected endpoint
+- **Case isolation bypass**: reading, counting, or changing a case opened under a different session token without the API key, or telling another visitor's case id apart from one that does not exist
 - **Remote code execution** in the FastAPI backend
 - **SQL injection** — relevant because cases are persisted via SQLAlchemy; raw-SQL bypasses or unsafe `text()` usage are in scope
 - **Cross-site scripting (XSS)** in the React frontend, particularly in rendered alert content or AI-generated report fields
@@ -61,11 +62,28 @@ These are known limitations of a portfolio project running on free hosting tiers
 - **Outdated browser compatibility** — only modern evergreen browsers are supported
 - **Reports from automated scanners** with no manual validation or proof of exploitability
 
+## Case Access Model
+
+Visitors are isolated from each other by a **session token**, not by accounts:
+
+- The frontend makes a random token with `crypto.randomUUID()` on first load, keeps it in `localStorage`, and sends it as `X-Session-Token` on every API call.
+- `POST /api/triage` requires the token and stores its SHA-256 as the case's `owner_hash`. The token itself is never stored or logged.
+- `GET /api/cases`, `GET /api/cases/{id}` and `GET /api/dashboard` return only the caller's cases. A case owned by another token returns `404`, identical to a missing case. With no token they return no cases.
+- `PATCH /api/cases/{id}/status`, `/note` and `/close` accept the owning token. With neither a token nor a key they return `401` before the case lookup.
+- A valid `X-API-Key` (the operator key, `SOCTRIAGE_API_KEYS`) sees and changes every case. Cases created before ownership existed have no owner, so only the key reaches them.
+
+What this does and does not protect against:
+
+- It does stop one visitor of the public demo from seeing or changing another visitor's cases.
+- It does not authenticate a person. Anyone holding a token (for example, someone with access to the same browser profile) has that token's cases. Clearing site data loses access to them from that browser.
+- The operator key is never built into the frontend bundle; there is no `VITE_API_KEY`. It is only typed in at runtime, held in page memory, and never written to browser storage.
+
 ## API Key Handling
 
 - The Anthropic API key is read only from environment variables. It is never committed to the repository, and gitleaks scans the full git history for secrets with GitHub push protection enabled.
 - Production uses a dedicated service-account key that lives in its own workspace, with a monthly spend cap and an expiry date. The key is rotated before it expires.
 - The test suite mocks the Anthropic client, so developer machines need no key to run the tests.
+- The SOCTriage operator key (`SOCTRIAGE_API_KEYS`) lives only in the backend environment. The frontend has no build-time key; an operator types it into the page at runtime.
 
 ## Safe Harbor
 

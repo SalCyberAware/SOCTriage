@@ -24,7 +24,7 @@ import pytest
 import audit
 import auth
 import limits
-from conftest import TEST_API_KEY
+from conftest import SESSION_TOKEN_A, TEST_API_KEY
 from models import IOCType, Severity
 from routes import triage as triage_route
 
@@ -181,11 +181,11 @@ class TestRecord:
 
 class TestTriageIsAudited:
     def test_records_the_case_it_opened(
-        self, anon_client, monkeypatch, audit_log, make_enrichment, make_report
+        self, owner_client, monkeypatch, audit_log, make_enrichment, make_report
     ) -> None:
         _stub_triage_externals(monkeypatch, make_enrichment, make_report)
 
-        response = anon_client.post(
+        response = owner_client(SESSION_TOKEN_A).post(
             "/api/triage",
             json={"ioc": "8.8.8.8", "ioc_type": "ip"},
             headers={"x-forwarded-for": "203.0.113.7"},
@@ -197,12 +197,13 @@ class TestTriageIsAudited:
         assert entry["case_id"] == response.json()["case_id"]
         assert entry["ip"] == "203.0.113.7"
 
-    def test_an_anonymous_triage_is_recorded_as_unauthenticated(
-        self, anon_client, monkeypatch, audit_log, make_enrichment, make_report
+    def test_a_token_only_triage_is_recorded_as_unauthenticated(
+        self, owner_client, monkeypatch, audit_log, make_enrichment, make_report
     ) -> None:
+        """A session token identifies a browser, not an operator."""
         _stub_triage_externals(monkeypatch, make_enrichment, make_report)
 
-        anon_client.post("/api/triage", json={"ioc": "8.8.8.8"})
+        owner_client(SESSION_TOKEN_A).post("/api/triage", json={"ioc": "8.8.8.8"})
 
         assert audit_log[0]["authenticated"] is False
 
@@ -217,12 +218,12 @@ class TestTriageIsAudited:
         assert audit_log[0]["authenticated"] is True
 
     def test_a_wrong_key_is_recorded_as_unauthenticated(
-        self, anon_client, monkeypatch, audit_log, make_enrichment, make_report
+        self, owner_client, monkeypatch, audit_log, make_enrichment, make_report
     ) -> None:
         """Presenting a key is not identifying yourself; the key has to be valid."""
         _stub_triage_externals(monkeypatch, make_enrichment, make_report)
 
-        anon_client.post(
+        owner_client(SESSION_TOKEN_A).post(
             "/api/triage",
             json={"ioc": "8.8.8.8"},
             headers={auth.API_KEY_HEADER: "not-the-key"},
@@ -231,12 +232,12 @@ class TestTriageIsAudited:
         assert audit_log[0]["authenticated"] is False
 
     def test_uses_the_leftmost_forwarded_for_entry(
-        self, anon_client, monkeypatch, audit_log, make_enrichment, make_report
+        self, owner_client, monkeypatch, audit_log, make_enrichment, make_report
     ) -> None:
         """The IP is the client behind the proxy, not the proxy's own hop."""
         _stub_triage_externals(monkeypatch, make_enrichment, make_report)
 
-        anon_client.post(
+        owner_client(SESSION_TOKEN_A).post(
             "/api/triage",
             json={"ioc": "8.8.8.8"},
             headers={"x-forwarded-for": "203.0.113.7, 70.41.3.18, 150.172.238.178"},
@@ -344,13 +345,13 @@ class TestSensitiveValuesAreNeverLogged:
         assert all(secret not in line for line in raw_audit_log)
 
     def test_the_raw_alert_and_analyst_notes_never_appear(
-        self, anon_client, monkeypatch, raw_audit_log, make_enrichment, make_report
+        self, client, monkeypatch, raw_audit_log, make_enrichment, make_report
     ) -> None:
         _stub_triage_externals(monkeypatch, make_enrichment, make_report)
         alert_text = "CrowdStrike: outbound to 185.220.101.45 from WS-042 at 0200"
         note_text = "user says they were asleep, escalating to the IR lead"
 
-        anon_client.post(
+        client.post(
             "/api/triage",
             json={
                 "ioc": "8.8.8.8",
@@ -427,18 +428,26 @@ class TestNothingIsRecordedWhenNothingChanged:
         assert audit_log == []
 
     def test_a_rejected_triage_records_nothing(
-        self, anon_client, monkeypatch, audit_log
+        self, owner_client, monkeypatch, audit_log
     ) -> None:
         """A triage turned away by the length cap never opened a case."""
         monkeypatch.setattr(
             triage_route, "limiter", limits.Limiter(max_raw_alert_chars=10)
         )
 
-        response = anon_client.post(
+        response = owner_client(SESSION_TOKEN_A).post(
             "/api/triage", json={"ioc": "8.8.8.8", "raw_alert": "x" * 11}
         )
 
         assert response.status_code == 400
+        assert audit_log == []
+
+    def test_a_triage_without_a_token_records_nothing(
+        self, anon_client, audit_log
+    ) -> None:
+        response = anon_client.post("/api/triage", json={"ioc": "8.8.8.8"})
+
+        assert response.status_code == 401
         assert audit_log == []
 
     @pytest.mark.parametrize(

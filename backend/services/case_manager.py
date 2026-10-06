@@ -3,13 +3,19 @@
 Cases are stored in a relational database (see database.py) rather than in
 memory, so they survive restarts. This module is the only place that bridges
 the database rows and the Pydantic models used by the API: every public
-method still accepts and returns the same Pydantic types as before, so the
-routes did not have to change.
+method still accepts and returns the same Pydantic types as before.
+
+Every read and every write takes a CaseScope saying whose cases the caller may
+touch. A case outside the scope is reported exactly like a missing one (None),
+so the routes cannot accidentally answer differently for the two. The default
+scope is ALL_CASES, which is what the API key gets and what internal callers
+that are not acting for a visitor want.
 """
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, false, func, select
 
 from database import CaseRow, SessionLocal
 from models import (
@@ -21,6 +27,37 @@ from models import (
     Severity,
     TimelineEvent,
 )
+
+
+@dataclass(frozen=True)
+class CaseScope:
+    """Which cases a caller may see and change.
+
+    ``everything`` is the API key. Otherwise only rows whose owner_hash equals
+    ``owner_hash``; with no owner_hash that is no rows at all, and in
+    particular not the legacy rows whose owner_hash is NULL.
+    """
+
+    owner_hash: str | None = None
+    everything: bool = False
+
+    def allows(self, row: CaseRow) -> bool:
+        if self.everything:
+            return True
+        return self.owner_hash is not None and row.owner_hash == self.owner_hash
+
+    def apply(self, statement: Select) -> Select:
+        """Restrict a SELECT over cases to this scope."""
+        if self.everything:
+            return statement
+        # owner_hash None compiles to "owner_hash IS NULL", which would match
+        # exactly the legacy rows this scope must not see; match nothing.
+        if self.owner_hash is None:
+            return statement.where(false())
+        return statement.where(CaseRow.owner_hash == self.owner_hash)
+
+
+ALL_CASES = CaseScope(everything=True)
 
 
 def _ioc_type_str(ioc_type, enrichment: EnrichmentResult) -> str:
@@ -62,12 +99,19 @@ def _row_to_case(row: CaseRow) -> Case:
     )
 
 
+def _load(session, case_id: str, scope: CaseScope) -> CaseRow | None:
+    """The row for ``case_id`` if it exists AND is in scope, else None."""
+    row = session.get(CaseRow, case_id)
+    return row if row is not None and scope.allows(row) else None
+
+
 class CaseManager:
     """Reads and writes triage cases through the database."""
 
     def open_case(self, ioc: str, ioc_type, severity: Severity,
                   enrichment: EnrichmentResult, report: IncidentReport,
-                  analyst_notes: str | None = None) -> Case:
+                  analyst_notes: str | None = None,
+                  owner_hash: str | None = None) -> Case:
         case_id = str(uuid.uuid4())[:8].upper()
         now = datetime.now(UTC)
 
@@ -97,24 +141,27 @@ class CaseManager:
                 enrichment=enrichment.model_dump(mode="json"),
                 report=report.model_dump(mode="json"),
                 timeline=timeline,
+                owner_hash=owner_hash,
             )
             session.add(row)
             session.commit()
             return _row_to_case(row)
 
-    def list_cases(self) -> list[Case]:
+    def list_cases(self, scope: CaseScope = ALL_CASES) -> list[Case]:
         with SessionLocal() as session:
-            rows = session.scalars(select(CaseRow).order_by(CaseRow.created_at)).all()
+            statement = scope.apply(select(CaseRow).order_by(CaseRow.created_at))
+            rows = session.scalars(statement).all()
             return [_row_to_case(row) for row in rows]
 
-    def get_case(self, case_id: str) -> Case | None:
+    def get_case(self, case_id: str, scope: CaseScope = ALL_CASES) -> Case | None:
         with SessionLocal() as session:
-            row = session.get(CaseRow, case_id)
+            row = _load(session, case_id, scope)
             return _row_to_case(row) if row else None
 
-    def update_status(self, case_id: str, status: CaseStatus) -> Case | None:
+    def update_status(self, case_id: str, status: CaseStatus,
+                      scope: CaseScope = ALL_CASES) -> Case | None:
         with SessionLocal() as session:
-            row = session.get(CaseRow, case_id)
+            row = _load(session, case_id, scope)
             if row is None:
                 return None
             now = datetime.now(UTC)
@@ -126,9 +173,10 @@ class CaseManager:
             session.commit()
             return _row_to_case(row)
 
-    def add_note(self, case_id: str, note: str) -> Case | None:
+    def add_note(self, case_id: str, note: str,
+                 scope: CaseScope = ALL_CASES) -> Case | None:
         with SessionLocal() as session:
-            row = session.get(CaseRow, case_id)
+            row = _load(session, case_id, scope)
             if row is None:
                 return None
             now = datetime.now(UTC)
@@ -137,9 +185,10 @@ class CaseManager:
             session.commit()
             return _row_to_case(row)
 
-    def close_case(self, case_id: str, resolution: str) -> Case | None:
+    def close_case(self, case_id: str, resolution: str,
+                   scope: CaseScope = ALL_CASES) -> Case | None:
         with SessionLocal() as session:
-            row = session.get(CaseRow, case_id)
+            row = _load(session, case_id, scope)
             if row is None:
                 return None
             now = datetime.now(UTC)
@@ -151,22 +200,24 @@ class CaseManager:
             session.commit()
             return _row_to_case(row)
 
-    def get_stats(self) -> dict:
+    def get_stats(self, scope: CaseScope = ALL_CASES) -> dict:
         with SessionLocal() as session:
-            total = session.scalar(select(func.count()).select_from(CaseRow)) or 0
+            total = session.scalar(
+                scope.apply(select(func.count()).select_from(CaseRow))
+            ) or 0
             # Unpacked per row rather than dict(rows): a SQLAlchemy Row is
             # iterable but is not typed as a 2-tuple, so dict() over it has no
             # inferable key/value type.
             status_counts: dict[str, int] = {
                 status: count
                 for status, count in session.execute(
-                    select(CaseRow.status, func.count()).group_by(CaseRow.status)
+                    scope.apply(select(CaseRow.status, func.count())).group_by(CaseRow.status)
                 ).all()
             }
             severity_counts: dict[str, int] = {
                 severity: count
                 for severity, count in session.execute(
-                    select(CaseRow.severity, func.count()).group_by(CaseRow.severity)
+                    scope.apply(select(CaseRow.severity, func.count())).group_by(CaseRow.severity)
                 ).all()
             }
 

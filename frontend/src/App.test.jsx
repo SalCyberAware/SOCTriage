@@ -11,6 +11,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import App from "./App.jsx";
+// The source as text, to check what can and cannot end up in the bundle.
+import APP_SOURCE from "./App.jsx?raw";
 
 const iocInput = () => screen.getByPlaceholderText(/8\.8\.8\.8/);
 const typeSelect = () => screen.getByRole("combobox");
@@ -221,13 +223,11 @@ describe("Cases list loading", () => {
   });
 });
 
-// The backend now requires an API key on PATCH /api/cases/{id}/status, and a
-// browser bundle cannot hold a secret, so the hosted build ships without one.
-// Rather than offering a status button that can only ever return 401, the tab
-// replaces the buttons with a note. These tests pin both halves: the note in
-// place of the buttons when unkeyed, the buttons plus the header when keyed.
-describe("Cases tab status buttons and the API key", () => {
-  const WRITABLE_CASE = {
+// Case ownership: every call carries this browser's session token, and the
+// admin key exists only when an operator types it in. There is no build-time
+// key any more, because anything Vite inlines is public.
+describe("Session token and admin key", () => {
+  const OWN_CASE = {
     case_id: "CASE0001",
     ioc: "185.220.101.45",
     ioc_type: "ip",
@@ -250,120 +250,154 @@ describe("Cases tab status buttons and the API key", () => {
     ],
   };
 
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const STORAGE_KEY = "soctriage.sessionToken";
+
   /** Open the Cases tab and expand the one seeded case. */
   async function expandTheCase(user) {
     await user.click(casesTab());
     await user.click(await screen.findByText(/185\.220\.101\.45/));
   }
 
+  async function typeAdminKey(user, key) {
+    await user.type(screen.getByPlaceholderText(/Admin API key/i), key);
+    await user.click(screen.getByRole("button", { name: /Use key/i }));
+  }
+
   const statusButtons = () =>
     screen.queryAllByRole("button", { name: /^(open|in progress|escalated|closed)$/i });
 
-  describe("with no key configured", () => {
-    it("shows a note instead of the status buttons", async () => {
-      installFetch({ cases: [WRITABLE_CASE] });
-      const user = userEvent.setup();
-      render(<App />);
-
-      await expandTheCase(user);
-
-      expect(
-        await screen.findByText(/Changing a case requires an API key/i)
-      ).toBeInTheDocument();
-      expect(statusButtons()).toHaveLength(0);
-    });
-
-    it("links the note to the README's Authentication section", async () => {
-      installFetch({ cases: [WRITABLE_CASE] });
-      const user = userEvent.setup();
-      render(<App />);
-
-      await expandTheCase(user);
-
-      const link = await screen.findByRole("link", {
-        name: /How authentication works/i,
-      });
-      expect(link).toHaveAttribute(
-        "href",
-        "https://github.com/SalCyberAware/SOCTriage#authentication"
-      );
-    });
-
-    it("leaves the rest of the case view intact", async () => {
-      // The point of the note is that only the write control goes away. The
-      // report, the MITRE techniques and the timeline all still render.
-      installFetch({ cases: [WRITABLE_CASE] });
-      const user = userEvent.setup();
-      render(<App />);
-
-      await expandTheCase(user);
-
-      expect(
-        await screen.findByText(/Outbound connection to a known C2 node/)
-      ).toBeInTheDocument();
-      expect(screen.getByText(/T1071\.001/)).toBeInTheDocument();
-      expect(screen.getByText(/Case opened/)).toBeInTheDocument();
-    });
-
-    it("sends no PATCH at all", async () => {
-      const calls = installFetch({ cases: [WRITABLE_CASE] });
-      const user = userEvent.setup();
-      render(<App />);
-
-      await expandTheCase(user);
-
-      expect(calls.filter(c => c.options?.method === "PATCH")).toHaveLength(0);
-    });
+  beforeEach(() => {
+    localStorage.clear();
   });
 
-  describe("with a key configured", () => {
-    it("renders the status buttons and no note", async () => {
-      vi.stubEnv("VITE_API_KEY", "a-configured-key");
-      installFetch({ cases: [WRITABLE_CASE] });
-      const user = userEvent.setup();
-      render(<App />);
+  it("creates a random token on first load and keeps it in localStorage", async () => {
+    installFetch();
+    render(<App />);
 
-      await expandTheCase(user);
+    await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toMatch(UUID));
+  });
 
-      expect(statusButtons().length).toBeGreaterThan(0);
-      expect(
-        screen.queryByText(/Changing a case requires an API key/i)
-      ).not.toBeInTheDocument();
+  it("reuses the stored token instead of making a new one", async () => {
+    localStorage.setItem(STORAGE_KEY, "11111111-1111-4111-8111-111111111111");
+    const calls = installFetch();
+    render(<App />);
+
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("11111111-1111-4111-8111-111111111111");
+    expect(calls[0].options.headers["X-Session-Token"]).toBe(
+      "11111111-1111-4111-8111-111111111111"
+    );
+  });
+
+  it("sends the token on every API call, and no key by default", async () => {
+    const calls = installFetch({ cases: [OWN_CASE] });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(iocInput(), "8.8.8.8");
+    await user.click(runTriage());
+    await user.click(await screen.findByRole("button", { name: /New Triage/ }));
+    await expandTheCase(user);
+    await user.click(screen.getByRole("button", { name: /^escalated$/i }));
+    await user.click(screen.getByRole("button", { name: /Dashboard/ }));
+
+    await waitFor(() => {
+      const paths = calls.map(c => new URL(c.url).pathname);
+      for (const path of ["/health", "/api/triage", "/api/cases", "/api/cases/CASE0001/status", "/api/dashboard"]) {
+        expect(paths).toContain(path);
+      }
     });
+    const token = localStorage.getItem(STORAGE_KEY);
+    for (const call of calls) {
+      expect(call.options.headers["X-Session-Token"]).toBe(token);
+      expect(call.options.headers["X-API-Key"]).toBeUndefined();
+    }
+  });
 
-    it("sends the key in the X-API-Key header on a status change", async () => {
-      vi.stubEnv("VITE_API_KEY", "a-configured-key");
-      const calls = installFetch({ cases: [WRITABLE_CASE] });
-      const user = userEvent.setup();
-      render(<App />);
-
-      await expandTheCase(user);
-      await user.click(screen.getByRole("button", { name: /^escalated$/i }));
-
-      const patch = await waitFor(() => {
-        const call = calls.find(c => c.options?.method === "PATCH");
-        expect(call).toBeDefined();
-        return call;
-      });
-      expect(patch.url).toContain("/api/cases/CASE0001/status");
-      expect(patch.options.headers["X-API-Key"]).toBe("a-configured-key");
-      expect(JSON.parse(patch.options.body)).toEqual({ status: "escalated" });
+  it("still works when localStorage is unavailable", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
     });
+    const calls = installFetch();
+    render(<App />);
 
-    it("ignores a key that is only whitespace", async () => {
-      // An env var set to "" or " " in a deploy config is a key that is not
-      // configured, not a key of one space.
-      vi.stubEnv("VITE_API_KEY", "   ");
-      installFetch({ cases: [WRITABLE_CASE] });
-      const user = userEvent.setup();
-      render(<App />);
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    expect(calls[0].options.headers["X-Session-Token"]).toMatch(UUID);
+  });
 
-      await expandTheCase(user);
+  it("tells visitors their cases are tied to this browser", () => {
+    installFetch();
+    render(<App />);
 
-      expect(
-        await screen.findByText(/Changing a case requires an API key/i)
-      ).toBeInTheDocument();
-      expect(statusButtons()).toHaveLength(0);
+    expect(screen.getByText(/Cases you open are tied to this browser/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /How this works/i })).toHaveAttribute(
+      "href",
+      "https://github.com/SalCyberAware/SOCTriage#authentication"
+    );
+  });
+
+  it("offers the status buttons on the visitor's own cases without any key", async () => {
+    installFetch({ cases: [OWN_CASE] });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await expandTheCase(user);
+
+    expect(statusButtons()).toHaveLength(4);
+    expect(screen.getByText(/Outbound connection to a known C2 node/)).toBeInTheDocument();
+  });
+
+  it("sends a typed admin key and refetches the cases with it", async () => {
+    const calls = installFetch({ cases: [OWN_CASE] });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(casesTab());
+    await screen.findByText(/185\.220\.101\.45/);
+
+    await typeAdminKey(user, "typed-at-runtime");
+
+    await waitFor(() => {
+      const keyed = calls.filter(
+        c => c.url.endsWith("/api/cases") && c.options.headers["X-API-Key"] === "typed-at-runtime"
+      );
+      expect(keyed).toHaveLength(1);
     });
+    expect(screen.getByText(/Admin key in use for this page/i)).toBeInTheDocument();
+  });
+
+  it("never stores the admin key", async () => {
+    installFetch();
+    const user = userEvent.setup();
+    render(<App />);
+
+    await typeAdminKey(user, "typed-at-runtime");
+
+    const stored = Object.keys(localStorage).map(k => localStorage.getItem(k)).join(" ");
+    expect(stored).not.toContain("typed-at-runtime");
+    expect(Object.keys(sessionStorage)).toHaveLength(0);
+  });
+
+  it("stops sending the key once it is forgotten", async () => {
+    const calls = installFetch({ cases: [OWN_CASE] });
+    const user = userEvent.setup();
+    render(<App />);
+    await typeAdminKey(user, "typed-at-runtime");
+
+    await user.click(screen.getByRole("button", { name: /Forget key/i }));
+    await expandTheCase(user);
+    await user.click(screen.getByRole("button", { name: /^closed$/i }));
+
+    const patch = await waitFor(() => {
+      const call = calls.find(c => c.options?.method === "PATCH");
+      expect(call).toBeDefined();
+      return call;
+    });
+    expect(patch.options.headers["X-API-Key"]).toBeUndefined();
+    expect(patch.options.headers["X-Session-Token"]).toMatch(UUID);
+  });
+
+  it("builds no key into the bundle", () => {
+    expect(APP_SOURCE).not.toMatch(/VITE_API_KEY/);
   });
 });

@@ -50,7 +50,7 @@ Note that the hosted demo ships no API key, so the Cases tab is read-only there.
 - **Case Management.** Cases are opened automatically with full timeline logging; status can be updated (OPEN, IN_PROGRESS, ESCALATED, CLOSED)
 - **Persistent storage.** Cases live in PostgreSQL in production and in a local SQLite file for development, so they survive restarts. The schema is managed by Alembic migrations, applied automatically on startup. See [docs/MIGRATIONS.md](docs/MIGRATIONS.md)
 - **Dashboard.** Live stats by case status and severity
-- **API key authentication.** The three routes that modify an existing case require a key; triage and the reads stay open. See [Authentication](#authentication)
+- **Per-visitor case isolation.** Each browser gets a random session token, and sees and changes only the cases it opened. An operator API key reaches every case. See [Authentication](#authentication)
 - **Audit logging.** Every write records who did what, as one structured line per event. See [Audit Logging](#audit-logging)
 - **Abuse controls.** Per-IP rate limiting, a global daily cap on the one endpoint that spends money, and length caps on every free-text input
 
@@ -115,18 +115,20 @@ SOCTriage is a fast first-pass triage layer: paste an IOC, get enriched intel fr
 ## API Endpoints
 
 ```
-POST   /api/triage              Submit IOC for enrichment + AI report + case creation
-GET    /api/cases               List all cases
-GET    /api/cases/{id}          Get single case with full timeline
-PATCH  /api/cases/{id}/status   Update case status                 [API key]
-PATCH  /api/cases/{id}/note     Add analyst note                   [API key]
-PATCH  /api/cases/{id}/close    Close case with resolution         [API key]
-GET    /api/dashboard           Stats by status and severity
+POST   /api/triage              Submit IOC for enrichment + AI report + case creation   [token]
+GET    /api/cases               List the caller's cases                                [scoped]
+GET    /api/cases/{id}          Get single case with full timeline                     [scoped]
+PATCH  /api/cases/{id}/status   Update case status                                     [owner or key]
+PATCH  /api/cases/{id}/note     Add analyst note                                       [owner or key]
+PATCH  /api/cases/{id}/close    Close case with resolution                             [owner or key]
+GET    /api/dashboard           Stats by status and severity                           [scoped]
 GET    /health                  Health check, reports the running commit
 ```
 
-`[API key]` marks the routes that require authentication. See
-[Authentication](#authentication) below. Everything else is open.
+`[token]` needs an `X-Session-Token`. `[scoped]` returns only the cases that
+token opened, or every case with a valid `X-API-Key`. `[owner or key]` needs
+the token that opened the case, or the key. See
+[Authentication](#authentication) below.
 
 ### Example Request
 
@@ -184,17 +186,59 @@ indicator itself.
 
 ## Authentication
 
-The three routes that **modify an existing case** require an API key. Everything
-else is open: `POST /api/triage`, all three reads, and `/health`.
+SOCTriage has two credentials. A **session token** makes a visitor the owner of
+the cases they open. The operator's **API key** reaches every case.
 
-| Endpoint | Key required? | Why |
-|----------|---------------|-----|
-| `POST /api/triage` | No | It is the public demo. Its cost is already bounded by the [abuse controls](backend/limits.py): a per-IP rate limit and a global daily cap on the one endpoint that spends Anthropic and ThreatScan quota. A key here would close the demo and close nothing else. |
-| `GET /api/cases`, `GET /api/cases/{id}`, `GET /api/dashboard` | No | Reads. They touch nothing but the local database and cost nothing per call. |
-| `PATCH /api/cases/{id}/status`, `/note`, `/close` | **Yes** | They mutate somebody else's investigation record. A case id is eight hex characters, guessable enough that "you need the id" is not a control. |
-| `GET /health` | No | Uptime monitoring. |
+| Endpoint | Session token (`X-Session-Token`) | API key (`X-API-Key`) | Neither |
+|----------|-----------------------------------|-----------------------|---------|
+| `POST /api/triage` | **Required.** The new case is owned by this token | Not enough on its own: a token is still required | `401` |
+| `GET /api/cases` | Only this token's cases | Every case | `[]` |
+| `GET /api/cases/{id}` | This token's case; any other id is `404` | Any case | `404` |
+| `GET /api/dashboard` | Counts this token's cases only | Counts every case | All zero |
+| `PATCH /api/cases/{id}/status`, `/note`, `/close` | This token's case; any other id is `404` | Any case | `401` |
+| `GET /health` | Not needed | Not needed | Open |
 
-### Using a key
+### Session tokens: visitors see only their own cases
+
+On first load the frontend makes a random token with `crypto.randomUUID()`,
+keeps it in `localStorage`, and sends it as `X-Session-Token` on every API
+call. `POST /api/triage` stores the token's **SHA-256** next to the new case,
+never the token itself. After that:
+
+- The reads return only the cases whose hash matches the caller's token.
+- The owner can change their own cases (status, note, close) with the same
+  token and no key.
+- **Another owner's case returns `404`, the same status and body as a case
+  that does not exist.** A token cannot be used to find out which case ids are
+  taken.
+- A request with no token sees no cases at all, and cannot open or change one.
+
+A token is not an account. It belongs to one browser, so clearing site data or
+switching browsers starts a new token, and cases opened under the old one are
+then reachable only with the API key. The app says so next to the triage form
+and on the Cases tab.
+
+A token must be 16 to 128 printable ASCII characters; anything else is treated
+as no token. Hashing means a leaked database holds nothing that can be replayed
+as a token. A plain SHA-256 is enough because the token is a 122-bit random
+UUID, not a password.
+
+Cases opened **before** ownership existed have no owner (`owner_hash` is
+`NULL`). No token matches them, so only the API key sees or changes them.
+
+```bash
+TOKEN=$(python -c "import uuid; print(uuid.uuid4())")
+
+curl -X POST https://soctriage-production.up.railway.app/api/triage \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Token: $TOKEN" \
+  -d '{"ioc": "8.8.8.8"}'
+
+curl https://soctriage-production.up.railway.app/api/cases \
+  -H "X-Session-Token: $TOKEN"
+```
+
+### The API key: the operator sees everything
 
 Send it in the `X-API-Key` header:
 
@@ -205,11 +249,15 @@ curl -X PATCH https://soctriage-production.up.railway.app/api/cases/4FA22FE3/sta
   -d '{"status": "in_progress"}'
 ```
 
-A missing or wrong key returns `401` with a plain `detail` message and changes
-nothing. The check runs **before** the case lookup, so an unauthenticated
-caller gets the same 401 for a case id that exists and one that does not. The
-routes are not an oracle for enumerating case ids. It also runs before the rate
-limiter, so a refused request does not eat into anyone's allowance.
+A valid key lists, reads, counts and changes every case, whoever owns it,
+including the ownerless legacy ones. A wrong key is ignored rather than
+rejected outright: the request is then judged on its session token alone.
+
+On the write routes, a request with neither a valid key nor a token returns
+`401` with a plain `detail` message and changes nothing. The check runs
+**before** the case lookup, so such a caller gets the same 401 for a case id
+that exists and one that does not, and it runs before the rate limiter, so a
+refused request does not eat into anyone's allowance.
 
 ### Configuring keys
 
@@ -230,8 +278,10 @@ response time does not depend on which key was used.
 
 ### It fails closed
 
-**With `SOCTRIAGE_API_KEYS` unset, the three PATCH routes return `401` to
-everyone.** They do not fall back to accepting unauthenticated writes.
+**With `SOCTRIAGE_API_KEYS` unset, no request is ever treated as the
+operator.** Owners can still open, read and change their own cases with their
+session token, but nothing reaches anyone else's cases or the legacy ones, and
+a write without a token returns `401` saying the deployment has no key.
 
 That is the inconvenient choice and it is deliberate. An auth check that
 disappears along with its configuration is not a control, because the case it
@@ -244,44 +294,21 @@ shape of failure as the stale deploy that
 where every signal was green and the thing itself was broken. Fail-closed turns
 them into a 401 on the first write, which is loud, immediate, and honest.
 
-The cost is bounded and recoverable: a fresh clone cannot PATCH until it sets
-the variable, and the 401 body says exactly that. Nothing that makes the demo
-work is affected either way.
-
 ### The frontend and the hosted demo
 
-[soctriage.vercel.app](https://soctriage.vercel.app) ships **no API key**. A
-browser bundle cannot hold a secret, because whatever is compiled into it is
-inlined at build time and readable by anyone who opens devtools, so the demo
-does not pretend to have one.
+[soctriage.vercel.app](https://soctriage.vercel.app) has **no API key built
+in, and no build can have one**. There is no `VITE_API_KEY` any more: whatever
+Vite compiles into a bundle is readable by anyone who opens devtools, so a key
+there would be a published key.
 
-The Cases tab reflects that honestly. With no key configured, the expanded case
-shows a short note in place of the status buttons, linking back to this
-section, rather than offering a button that can only ever return 401:
+Visitors need no key. Their session token lets them see and change the cases
+they opened, so the Cases tab shows the status buttons on every case it lists.
 
-> Changing a case requires an API key, and this build has none. The case below
-> is read-only. [How authentication works](#authentication)
-
-**Everything else on the tab is unchanged**: the case list, the AI summary, the
-MITRE techniques, the full timeline, plus triage and the dashboard. Only the
-one write control goes away.
-
-### Giving the frontend a key
-
-Set `VITE_API_KEY` at build time and the status buttons come back, sending the
-key in `X-API-Key`:
-
-```bash
-echo "VITE_API_KEY=your_key" >> frontend/.env
-```
-
-Do this **only where the bundle itself is not public**, such as an internal
-deployment or a build behind SSO, and treat the value as disclosed regardless,
-because it is. A value that is empty or only whitespace counts as no key.
-
-For a public deployment, the options that actually keep a key secret are to
-drive the write endpoints from `curl` or a script, or to put a thin server-side
-proxy in front that holds the key and is itself rate-limited.
+An operator who needs every case types the key into the **Admin API key** field
+at the bottom of the page. It is held in the page's memory only: never written
+to `localStorage` or any other storage, sent only as `X-API-Key`, and forgotten
+on reload or with **Forget key**. Treat any browser you type it into as one
+that has seen it.
 
 ---
 
@@ -400,8 +427,9 @@ The full annotated list lives in
 ANTHROPIC_API_KEY=your_anthropic_api_key
 THREATSCAN_API_URL=https://threatscan-production.up.railway.app/api
 
-# Required for the three PATCH routes. Without it they return 401 to everyone.
-# Comma-separate several values to rotate keys. See "Authentication" above.
+# The operator key: sees and changes every case. Without it, nobody can reach
+# another visitor's cases or the pre-ownership ones. Comma-separate several
+# values to rotate keys. See "Authentication" above.
 SOCTRIAGE_API_KEYS=generate_one_with_secrets.token_urlsafe
 
 # Recommended: CORS allowlist origin
@@ -435,9 +463,8 @@ npm install
 
 echo "VITE_API_URL=http://localhost:8080" > .env
 
-# Optional: enables the Cases tab status buttons. Read the warning in
-# "Giving the frontend a key" above before setting this on a public build.
-echo "VITE_API_KEY=the_same_value_as_SOCTRIAGE_API_KEYS" >> .env
+# No key goes in .env: the frontend has no build-time key. To act as the
+# operator, type the key into the Admin API key field at the bottom of the page.
 
 npm run dev
 ```

@@ -34,7 +34,7 @@ else:
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from auth import API_KEY_HEADER  # noqa: E402
+from auth import API_KEY_HEADER, SESSION_TOKEN_HEADER  # noqa: E402
 from database import Base, engine, init_db  # noqa: E402
 from main import app  # noqa: E402
 from models import (  # noqa: E402
@@ -51,6 +51,13 @@ from services.case_manager import CaseManager  # noqa: E402
 # unconfigured (fail-closed) case has to delete the variable deliberately.
 TEST_API_KEY = "test-api-key-not-a-real-secret"
 
+# The session token the ``client`` fixture presents, so its triage requests
+# open cases (POST /api/triage requires a token). Two more for the ownership
+# tests, which need distinct visitors.
+TEST_SESSION_TOKEN = "00000000-0000-4000-8000-000000000000"
+SESSION_TOKEN_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+SESSION_TOKEN_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
 
 @pytest.fixture(autouse=True)
 def _configured_api_key(monkeypatch):
@@ -64,20 +71,34 @@ def _configured_api_key(monkeypatch):
 
 @pytest.fixture
 def client(_configured_api_key) -> TestClient:
-    """A TestClient that presents a valid API key on every request.
+    """A TestClient that presents a valid API key and a session token.
 
     The default for the suite: the gated routes are a detail most tests should
-    not have to restate. httpx merges these defaults with per-request headers,
-    so a test can still add its own (x-forwarded-for, a different key) freely.
+    not have to restate. The key makes every case visible to it whoever owns
+    the case; the token is there because opening a case requires one. httpx
+    merges these defaults with per-request headers, so a test can still add
+    its own (x-forwarded-for, a different key) freely.
     Tests that exercise the unauthenticated paths use ``anon_client``.
     """
-    return TestClient(app, headers={API_KEY_HEADER: TEST_API_KEY})
+    return TestClient(
+        app,
+        headers={API_KEY_HEADER: TEST_API_KEY, SESSION_TOKEN_HEADER: TEST_SESSION_TOKEN},
+    )
 
 
 @pytest.fixture
 def anon_client() -> TestClient:
-    """A TestClient that presents no API key at all."""
+    """A TestClient that presents neither an API key nor a session token."""
     return TestClient(app)
+
+
+@pytest.fixture
+def owner_client():
+    """Factory for a TestClient that presents only the given session token."""
+    def _make(token: str) -> TestClient:
+        return TestClient(app, headers={SESSION_TOKEN_HEADER: token})
+
+    return _make
 
 
 @pytest.fixture(scope="session", autouse=True)

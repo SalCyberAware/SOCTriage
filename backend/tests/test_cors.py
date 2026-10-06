@@ -73,6 +73,9 @@ def test_unset_frontend_url_adds_no_allow_origin_to_simple_request(monkeypatch):
         ("GET", ""),
         ("POST", "content-type"),
         ("PATCH", "content-type,x-api-key"),
+        ("GET", "x-session-token"),
+        ("POST", "content-type,x-session-token"),
+        ("PATCH", "content-type,x-session-token,x-api-key"),
     ],
 )
 def test_set_frontend_url_allows_what_the_app_sends(monkeypatch, method, headers):
