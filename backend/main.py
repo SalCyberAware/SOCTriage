@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+from typing import TypedDict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -11,6 +12,7 @@ load_dotenv()
 # import time, so the .env file has to be loaded before it is imported.
 from database import init_db  # noqa: E402
 from routes.triage import router as triage_router  # noqa: E402
+from security_headers import SecurityHeadersMiddleware  # noqa: E402
 
 
 @asynccontextmanager
@@ -20,11 +22,39 @@ async def lifespan(app: FastAPI):
     yield
 
 
+# The interactive docs (/docs, /redoc) and the schema behind them
+# (/openapi.json) are OFF unless this is set to an explicit true value. They
+# hand anyone a complete map of every route, parameter and header, which is
+# useful on a laptop and nothing but reconnaissance on a public deployment.
+# A dedicated flag rather than ENV=development, so that a production service
+# carrying a stale ENV value cannot switch them on by accident.
+API_DOCS_FLAG = "SOCTRIAGE_ENABLE_API_DOCS"
+
+
+def api_docs_enabled() -> bool:
+    """Whether the docs flag is set to an explicit true value."""
+    return os.getenv(API_DOCS_FLAG, "").strip().lower() in ("1", "true", "yes")
+
+
+class DocsUrls(TypedDict):
+    docs_url: str | None
+    redoc_url: str | None
+    openapi_url: str | None
+
+
+def api_docs_urls() -> DocsUrls:
+    """FastAPI's docs settings: its defaults when enabled, all None when not."""
+    if api_docs_enabled():
+        return DocsUrls(docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json")
+    return DocsUrls(docs_url=None, redoc_url=None, openapi_url=None)
+
+
 app = FastAPI(
     title="SOC Triage Assistant API",
-    description="AI-powered SOC alert triage — enrichment, MITRE mapping, incident reports, case management",
+    description="AI-powered SOC alert triage: enrichment, MITRE mapping, incident reports, case management",
     version="1.0.0",
     lifespan=lifespan,
+    **api_docs_urls(),
 )
 
 # CORS is FAIL CLOSED, for the same reason auth.py is: an allowlist that turns
@@ -50,6 +80,11 @@ app.add_middleware(
     allow_methods=CORS_ALLOW_METHODS,
     allow_headers=CORS_ALLOW_HEADERS,
 )
+
+# Added after CORS, so it is the outer layer and also stamps the preflight
+# answers CORSMiddleware produces on its own. frontend/vercel.json sends the
+# same four on the static site.
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(triage_router)
 

@@ -53,6 +53,7 @@ Note that the hosted demo ships no API key, so the Cases tab is read-only there.
 - **Per-visitor case isolation.** Each browser gets a random session token, and sees and changes only the cases it opened. An operator API key reaches every case. See [Authentication](#authentication)
 - **Audit logging.** Every write records who did what, as one structured line per event. See [Audit Logging](#audit-logging)
 - **Abuse controls.** Per-IP rate limiting, a global daily cap on the one endpoint that spends money, and length caps on every free-text input
+- **Web hardening.** Security headers on the API and the site, a Report-Only Content-Security-Policy, API docs off in production, and IOC validation against the stated type. See [Web Hardening](#web-hardening)
 
 ---
 
@@ -144,7 +145,8 @@ curl -X POST https://soctriage-production.up.railway.app/api/triage \
 ```
 
 `ioc_type` is optional. When it is omitted, the type is detected from the
-indicator itself.
+indicator itself. When it is given, the IOC has to fit it, or the request is a
+`400`; see [Web Hardening](#web-hardening).
 
 ### Example Response
 
@@ -312,6 +314,57 @@ that has seen it.
 
 ---
 
+## Web Hardening
+
+**Security headers.** Every backend response, errors and CORS preflights
+included, carries:
+
+| Header | Value |
+|--------|-------|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` |
+
+The frontend sends the same four from [`frontend/vercel.json`](frontend/vercel.json),
+plus a **Content-Security-Policy in Report-Only mode**. It allows scripts only
+from the site itself, API calls only to the site and
+`https://soctriage-production.up.railway.app`, stylesheets from the site and
+Google Fonts (`fonts.googleapis.com`), font files from `fonts.gstatic.com`, and
+no plugins or framing. Report-Only means a browser logs a violation to the
+console instead of blocking anything, so the policy can be checked against the
+live site before it is enforced. If you self-host against a different API
+origin, add it to `connect-src` there.
+
+**No API docs in production.** `/docs`, `/redoc` and `/openapi.json` return
+`404` unless `SOCTRIAGE_ENABLE_API_DOCS` is set to `1`, `true` or `yes`. They
+are a full map of every route and header, which helps on a laptop and only
+helps an attacker on a public deployment. It is a dedicated flag rather than
+`ENV=development`, so a stale `ENV` value cannot turn them on.
+
+**Schema ceilings.** Every free-text field has a `max_length` in the request
+schema: `raw_alert` 100,000 characters, `ioc` 4,096, and `analyst_notes`,
+`note` and `resolution` 20,000. These sit ten times or more above the
+[abuse-control caps](backend/limits.py), so normal oversize input still gets
+the plain `400` naming the field and the cap; only something absurd is refused
+earlier with a `422`. If you raise a `SOCTRIAGE_MAX_*` cap, keep it below its
+ceiling.
+
+**A stated `ioc_type` must fit the IOC.** When `ioc_type` is given,
+`POST /api/triage` checks the indicator against it and answers `400` on a
+mismatch, before enrichment, the AI call or the rate limiter:
+
+| `ioc_type` | Accepted |
+|------------|----------|
+| `ip` | An IPv4 or IPv6 address |
+| `hash` | MD5, SHA-1 or SHA-256 in hex (32, 40 or 64 characters) |
+| `url` | An `http` or `https` URL with a host, no whitespace |
+| `domain` | Two or more dot-separated labels and an alphabetic or `xn--` TLD |
+
+Leave `ioc_type` out and the type is detected instead, as before.
+
+---
+
 ## Audit Logging
 
 Every write records who did what. All four of them, including the
@@ -453,6 +506,10 @@ SOCTRIAGE_DAILY_TRIAGE_CAP=50
 SOCTRIAGE_MAX_RAW_ALERT_CHARS=10000
 SOCTRIAGE_MAX_IOC_CHARS=256
 SOCTRIAGE_MAX_NOTE_CHARS=2000
+
+# Optional, development only. Serves /docs, /redoc and /openapi.json.
+# Leave unset in production. See "Web Hardening" above.
+# SOCTRIAGE_ENABLE_API_DOCS=true
 ```
 
 ### Frontend Setup

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import audit
 from auth import (
@@ -10,10 +10,10 @@ from auth import (
     resolve_caller,
 )
 from limits import LimitRejectedError, build_limiter, client_ip
-from models import AlertIntake, CaseStatus, TriageResponse
+from models import MAX_NOTE_SCHEMA_CHARS, AlertIntake, CaseStatus, TriageResponse
 from services.ai_engine import generate_report
 from services.case_manager import ALL_CASES, CaseScope, case_manager
-from services.enrichment import enrich_ioc
+from services.enrichment import enrich_ioc, ioc_matches_type
 
 router = APIRouter(prefix="/api")
 
@@ -105,11 +105,11 @@ class StatusUpdate(BaseModel):
 
 
 class NoteUpdate(BaseModel):
-    note: str
+    note: str = Field(max_length=MAX_NOTE_SCHEMA_CHARS)
 
 
 class CloseRequest(BaseModel):
-    resolution: str
+    resolution: str = Field(max_length=MAX_NOTE_SCHEMA_CHARS)
 
 
 @router.post("/triage", response_model=TriageResponse)
@@ -118,6 +118,19 @@ async def triage_alert(alert: AlertIntake, request: Request):
     # does on the PATCH routes: a refusal that costs nothing should spend
     # nothing, not even the caller's rate-limit allowance.
     owner = _require_owner_token(request)
+    # A stated type has to fit the indicator. Without this, "ioc_type": "ip"
+    # with a URL in "ioc" reaches ThreatScan and the model labelled wrongly,
+    # and the case records a type its own IOC contradicts. Checked ahead of the
+    # limiter: it is a pure string check, and a malformed request should not
+    # spend the caller's allowance. With no type given, enrichment detects one.
+    if alert.ioc_type is not None and not ioc_matches_type(alert.ioc, alert.ioc_type):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"ioc does not look like a valid {alert.ioc_type.value}. Check the "
+                "value, or leave ioc_type out to have the type detected."
+            ),
+        )
     ip = client_ip(request)
     # Gated before enrichment and the AI call: this is the endpoint that spends
     # Anthropic and ThreatScan quota, and the only one under the daily cap.

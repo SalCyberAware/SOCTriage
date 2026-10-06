@@ -79,6 +79,9 @@ function detectType(val) {
   if (/^[a-fA-F0-9]{32,64}$/.test(val.trim())) return "HASH";
   if (/^https?:\/\//i.test(val.trim())) return "URL";
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(val.trim())) return "IP";
+  // IPv6: hex groups and colons (with an optional embedded IPv4 tail). The
+  // backend checks a stated type properly; this only has to pick the right one.
+  if (val.includes(":") && /^[0-9a-fA-F:.]+$/.test(val.trim())) return "IP";
   return "DOMAIN";
 }
 
@@ -309,7 +312,9 @@ function TriageTab({ adminKey }) {
           analyst_notes: notes || null,
         }),
       });
-      if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
+      // describeError surfaces the backend's own message, e.g. that the IOC
+      // does not match the chosen type, instead of a bare status code.
+      if (!resp.ok) throw new Error(await describeError(resp));
       const data = await resp.json();
       setResult(data);
     } catch (e) {

@@ -85,6 +85,7 @@ describe("IOC type derivation", () => {
     ["malware.example.com", "DOMAIN"],
     ["https://evil.example.com/x", "URL"],
     ["d41d8cd98f00b204e9800998ecf8427e", "HASH"],
+    ["2001:4860:4860::8888", "IP"],
   ])("detects %s as %s while typing", async (value, expected) => {
     installFetch();
     const user = userEvent.setup();
@@ -93,6 +94,28 @@ describe("IOC type derivation", () => {
     await user.type(iocInput(), value);
 
     expect(typeSelect()).toHaveValue(expected);
+  });
+
+  it("shows the backend's reason when it rejects a triage", async () => {
+    // The backend answers a stated type that does not fit the IOC with a 400
+    // and a plain message; the form shows that, not just the status code.
+    vi.stubGlobal("fetch", vi.fn(async url => {
+      if (String(url).includes("/api/triage")) {
+        return new Response(
+          JSON.stringify({ detail: "ioc does not look like a valid ip. Check the value." }),
+          { status: 400 }
+        );
+      }
+      return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+    }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(iocInput(), "evil.example.com");
+    await user.selectOptions(typeSelect(), "IP");
+    await user.click(runTriage());
+
+    expect(await screen.findByText(/does not look like a valid ip/)).toBeInTheDocument();
   });
 
   it("lets an explicit pick override what the indicator looks like", async () => {
