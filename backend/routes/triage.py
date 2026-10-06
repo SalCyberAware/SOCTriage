@@ -2,11 +2,17 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 import audit
-from auth import AuthRejectedError, is_authenticated, require_api_key
+from auth import (
+    AuthRejectedError,
+    Caller,
+    require_case_writer,
+    require_session_owner,
+    resolve_caller,
+)
 from limits import LimitRejectedError, build_limiter, client_ip
 from models import AlertIntake, CaseStatus, TriageResponse
 from services.ai_engine import generate_report
-from services.case_manager import case_manager
+from services.case_manager import ALL_CASES, CaseScope, case_manager
 from services.enrichment import enrich_ioc
 
 router = APIRouter(prefix="/api")
@@ -15,8 +21,21 @@ router = APIRouter(prefix="/api")
 limiter = build_limiter()
 
 
-def _require_key(request: Request) -> None:
-    """Gate a write route on the API key, translating a rejection into a 401.
+def _scope(caller: Caller) -> CaseScope:
+    """The cases a caller may see and change: all of them with the key, else
+    only those its session token opened (none, without a token)."""
+    if caller.is_admin:
+        return ALL_CASES
+    return CaseScope(owner_hash=caller.owner_hash)
+
+
+def _require_writer(request: Request) -> Caller:
+    """Gate a write route on the API key or a session token; 401 otherwise.
+
+    A token gets through this gate whether or not it owns the case. Ownership
+    is checked by the scoped lookup afterwards, and a case the token does not
+    own answers the same 404 as one that does not exist, so a token cannot be
+    used to tell taken case ids from free ones either.
 
     Called as the FIRST statement of every gated route, ahead of the limiter
     and ahead of the case lookup. Ahead of the lookup because an unauthenticated
@@ -34,7 +53,7 @@ def _require_key(request: Request) -> None:
     of its allowance.
     """
     try:
-        require_api_key(request)
+        return require_case_writer(request)
     except AuthRejectedError as rejected:
         raise HTTPException(
             status_code=rejected.status_code,
@@ -42,13 +61,27 @@ def _require_key(request: Request) -> None:
         ) from rejected
 
 
-def _audit_case_write(endpoint: str, case_id: str, ip: str) -> None:
+def _require_owner_token(request: Request) -> str:
+    """The session token's owner hash, or a 401 if the request has none."""
+    try:
+        return require_session_owner(request)
+    except AuthRejectedError as rejected:
+        raise HTTPException(
+            status_code=rejected.status_code,
+            detail=rejected.message,
+        ) from rejected
+
+
+def _audit_case_write(endpoint: str, case_id: str, ip: str, caller: Caller) -> None:
     """Record a completed write to an existing case.
 
-    ``authenticated=True`` without asking: every route that calls this is
-    behind :func:`_require_key`, so there is no other way to have reached it.
+    ``authenticated`` means the API key, as it does everywhere in the trail. An
+    owner changing their own case through a session token is recorded as
+    unauthenticated: the token identifies a browser, not an operator.
     """
-    audit.record(endpoint=endpoint, case_id=case_id, ip=ip, authenticated=True)
+    audit.record(
+        endpoint=endpoint, case_id=case_id, ip=ip, authenticated=caller.is_admin
+    )
 
 
 def _enforce(check, **kwargs) -> None:
@@ -81,6 +114,10 @@ class CloseRequest(BaseModel):
 
 @router.post("/triage", response_model=TriageResponse)
 async def triage_alert(alert: AlertIntake, request: Request):
+    # The token comes first, ahead of the limiter, for the same reason the key
+    # does on the PATCH routes: a refusal that costs nothing should spend
+    # nothing, not even the caller's rate-limit allowance.
+    owner = _require_owner_token(request)
     ip = client_ip(request)
     # Gated before enrichment and the AI call: this is the endpoint that spends
     # Anthropic and ThreatScan quota, and the only one under the daily cap.
@@ -102,6 +139,7 @@ async def triage_alert(alert: AlertIntake, request: Request):
         enrichment=enrichment,
         report=report,
         analyst_notes=alert.analyst_notes,
+        owner_hash=owner,
     )
     # This route needs no key, but it can be given one, and the trail records
     # which it was. Neither the raw_alert nor the analyst notes are logged --
@@ -110,19 +148,24 @@ async def triage_alert(alert: AlertIntake, request: Request):
         endpoint="POST /api/triage",
         case_id=case.case_id,
         ip=ip,
-        authenticated=is_authenticated(request),
+        authenticated=resolve_caller(request).is_admin,
     )
     return TriageResponse(case_id=case.case_id, enrichment=enrichment, report=report)
 
 
+# The reads never answer 401. Without a key or a token they answer as if there
+# were no cases at all, because for that caller there are none.
+
+
 @router.get("/cases")
-async def list_cases():
-    return case_manager.list_cases()
+async def list_cases(request: Request):
+    return case_manager.list_cases(_scope(resolve_caller(request)))
 
 
 @router.get("/cases/{case_id}")
-async def get_case(case_id: str):
-    case = case_manager.get_case(case_id)
+async def get_case(case_id: str, request: Request):
+    # Another owner's case and a missing one are the same 404.
+    case = case_manager.get_case(case_id, _scope(resolve_caller(request)))
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     return case
@@ -130,24 +173,23 @@ async def get_case(case_id: str):
 
 @router.patch("/cases/{case_id}/status")
 async def update_status(case_id: str, body: StatusUpdate, request: Request):
-    _require_key(request)
+    caller = _require_writer(request)
     ip = client_ip(request)
     # No free text to cap: the body is a CaseStatus enum.
     _enforce(limiter.check_case_write, ip=ip)
 
-    case = case_manager.update_status(case_id, body.status)
+    case = case_manager.update_status(case_id, body.status, _scope(caller))
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     # After the write, so the trail records changes that happened. A 401, 429
     # or 404 above leaves no entry, because none of them changed anything.
-    # authenticated is unconditionally True: _require_key is the only way here.
-    _audit_case_write("PATCH /api/cases/{case_id}/status", case_id, ip)
+    _audit_case_write("PATCH /api/cases/{case_id}/status", case_id, ip, caller)
     return case
 
 
 @router.patch("/cases/{case_id}/note")
 async def add_note(case_id: str, body: NoteUpdate, request: Request):
-    _require_key(request)
+    caller = _require_writer(request)
     ip = client_ip(request)
     _enforce(
         limiter.check_case_write,
@@ -156,18 +198,18 @@ async def add_note(case_id: str, body: NoteUpdate, request: Request):
         text=body.note,
     )
 
-    case = case_manager.add_note(case_id, body.note)
+    case = case_manager.add_note(case_id, body.note, _scope(caller))
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     # The note text is deliberately absent from the entry: that a note was
     # added is auditable, what it said is the case timeline's business.
-    _audit_case_write("PATCH /api/cases/{case_id}/note", case_id, ip)
+    _audit_case_write("PATCH /api/cases/{case_id}/note", case_id, ip, caller)
     return case
 
 
 @router.patch("/cases/{case_id}/close")
 async def close_case(case_id: str, body: CloseRequest, request: Request):
-    _require_key(request)
+    caller = _require_writer(request)
     ip = client_ip(request)
     _enforce(
         limiter.check_case_write,
@@ -176,14 +218,14 @@ async def close_case(case_id: str, body: CloseRequest, request: Request):
         text=body.resolution,
     )
 
-    case = case_manager.close_case(case_id, body.resolution)
+    case = case_manager.close_case(case_id, body.resolution, _scope(caller))
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     # The resolution text is left out for the same reason as the note text.
-    _audit_case_write("PATCH /api/cases/{case_id}/close", case_id, ip)
+    _audit_case_write("PATCH /api/cases/{case_id}/close", case_id, ip, caller)
     return case
 
 
 @router.get("/dashboard")
-async def dashboard():
-    return case_manager.get_stats()
+async def dashboard(request: Request):
+    return case_manager.get_stats(_scope(resolve_caller(request)))

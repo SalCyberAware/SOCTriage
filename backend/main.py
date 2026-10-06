@@ -34,7 +34,7 @@ app = FastAPI(
 # frontend/src/App.jsx sends, and nothing in the app uses cookies, so
 # credentials stay off.
 CORS_ALLOW_METHODS = ["GET", "POST", "PATCH"]
-CORS_ALLOW_HEADERS = ["Content-Type", "X-API-Key"]
+CORS_ALLOW_HEADERS = ["Content-Type", "X-API-Key", "X-Session-Token"]
 
 
 def cors_allowed_origins() -> list[str]:

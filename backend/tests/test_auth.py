@@ -1,15 +1,17 @@
 """Tests for the API key gate on the write endpoints.
 
-Three layers:
+Session tokens and case ownership have their own file, tests/test_ownership.py;
+this one is about the key. Three layers:
   * unit tests on the pure helpers in auth.py -- how the environment is parsed
     and how a presented key is compared;
   * route tests proving each gated route answers 401 without a valid key and
     200 with one, and that the 401 happens before anything else does;
-  * route tests proving the endpoints that are deliberately open -- POST
-    /api/triage, the three reads, /health -- did not get gated by accident.
+  * route tests proving the endpoints that need no key -- POST /api/triage,
+    the three reads, /health -- did not get gated on it by accident.
 
-The shared ``client`` fixture (backend/conftest.py) presents a valid key; the
-``anon_client`` fixture presents none.
+The shared ``client`` fixture (backend/conftest.py) presents a valid key and a
+session token; the ``anon_client`` fixture presents neither, and
+``key_only_client`` below presents just the key.
 """
 from __future__ import annotations
 
@@ -17,7 +19,8 @@ import pytest
 
 import auth
 import limits
-from conftest import TEST_API_KEY
+from conftest import SESSION_TOKEN_A, TEST_API_KEY
+from main import app
 from models import IOCType, Severity
 from routes import triage as triage_route
 
@@ -39,6 +42,14 @@ def _seed_case(manager, make_enrichment, make_report):
         enrichment=make_enrichment(),
         report=make_report(),
     )
+
+
+@pytest.fixture
+def key_only_client():
+    """A TestClient that presents the API key and no session token."""
+    from fastapi.testclient import TestClient
+
+    return TestClient(app, headers={auth.API_KEY_HEADER: TEST_API_KEY})
 
 
 # -- configured_keys ----------------------------------------------------------
@@ -402,13 +413,13 @@ class TestFailsClosedWhenUnconfigured:
 
     @pytest.mark.parametrize(("suffix", "body"), GATED_ROUTES)
     def test_no_configured_key_means_401_even_with_a_key_presented(
-        self, client, monkeypatch, manager, make_enrichment, make_report,
+        self, key_only_client, monkeypatch, manager, make_enrichment, make_report,
         suffix: str, body: dict,
     ) -> None:
         case = _seed_case(manager, make_enrichment, make_report)
         monkeypatch.delenv(auth.API_KEY_ENV, raising=False)
 
-        response = client.patch(f"/api/cases/{case.case_id}/{suffix}", json=body)
+        response = key_only_client.patch(f"/api/cases/{case.case_id}/{suffix}", json=body)
 
         assert response.status_code == 401
         assert response.json() == {"detail": auth.NOT_CONFIGURED_MESSAGE}
@@ -426,16 +437,26 @@ class TestFailsClosedWhenUnconfigured:
         assert "no API key configured" in detail
 
     def test_the_demo_and_the_reads_still_work_unconfigured(
-        self, anon_client, monkeypatch, manager, make_enrichment, make_report,
+        self, owner_client, monkeypatch, make_enrichment, make_report,
     ) -> None:
-        """Failing closed closes the writes, not the public demo."""
-        case = _seed_case(manager, make_enrichment, make_report)
-        monkeypatch.delenv(auth.API_KEY_ENV, raising=False)
+        """Failing closed closes the operator's access, not the public demo.
 
-        assert anon_client.get("/health").status_code == 200
-        assert anon_client.get("/api/cases").status_code == 200
-        assert anon_client.get(f"/api/cases/{case.case_id}").status_code == 200
-        assert anon_client.get("/api/dashboard").status_code == 200
+        A visitor can still open a case, read it back, and change it, all with
+        their session token and no key anywhere in the deployment.
+        """
+        monkeypatch.delenv(auth.API_KEY_ENV, raising=False)
+        _stub_triage_externals(monkeypatch, make_enrichment, make_report)
+        visitor = owner_client(SESSION_TOKEN_A)
+
+        case_id = visitor.post("/api/triage", json={"ioc": "8.8.8.8"}).json()["case_id"]
+
+        assert visitor.get("/health").status_code == 200
+        assert len(visitor.get("/api/cases").json()) == 1
+        assert visitor.get(f"/api/cases/{case_id}").status_code == 200
+        assert visitor.get("/api/dashboard").json()["total"] == 1
+        assert visitor.patch(
+            f"/api/cases/{case_id}/status", json={"status": "closed"}
+        ).status_code == 200
 
 
 # -- The endpoints that stay open ---------------------------------------------
@@ -463,12 +484,12 @@ class TestOpenEndpointsStayOpen:
         assert anon_client.get(path).status_code in (200, 404)  # never 401
 
     def test_triage_needs_no_key(
-        self, anon_client, monkeypatch, make_enrichment, make_report,
+        self, owner_client, monkeypatch, make_enrichment, make_report,
     ) -> None:
-        """POST /api/triage is the demo. It stays open; limits.py bounds it."""
+        """POST /api/triage is the demo. A session token, not a key; limits.py bounds it."""
         _stub_triage_externals(monkeypatch, make_enrichment, make_report)
 
-        response = anon_client.post(
+        response = owner_client(SESSION_TOKEN_A).post(
             "/api/triage", json={"ioc": "8.8.8.8", "ioc_type": "ip"}
         )
 
@@ -476,12 +497,12 @@ class TestOpenEndpointsStayOpen:
         assert response.json()["case_id"]
 
     def test_triage_needs_no_key_even_when_none_is_configured(
-        self, anon_client, monkeypatch, make_enrichment, make_report,
+        self, owner_client, monkeypatch, make_enrichment, make_report,
     ) -> None:
-        """Fail-closed applies to the gated routes only, never to the demo."""
+        """Fail-closed applies to the key, never to the demo."""
         monkeypatch.delenv(auth.API_KEY_ENV, raising=False)
         _stub_triage_externals(monkeypatch, make_enrichment, make_report)
 
-        response = anon_client.post("/api/triage", json={"ioc": "8.8.8.8"})
+        response = owner_client(SESSION_TOKEN_A).post("/api/triage", json={"ioc": "8.8.8.8"})
 
         assert response.status_code == 200

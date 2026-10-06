@@ -46,7 +46,7 @@ cp .env.example .env
 |---|---|---|
 | `ANTHROPIC_API_KEY` | yes | Claude API key for incident-report generation |
 | `THREATSCAN_API_URL` | yes | Base URL of the enrichment service (e.g. `https://threatscan-production.up.railway.app/api`) |
-| `SOCTRIAGE_API_KEYS` | yes, for the PATCH routes | Comma-separated list of accepted API keys for the three case-mutating routes. **Unset means those routes return 401 to everyone**, by design. See the README's [Authentication](README.md#authentication) section |
+| `SOCTRIAGE_API_KEYS` | yes, for operator access | Comma-separated list of accepted operator keys. A valid key sees and changes every case; visitors only reach their own through their session token. **Unset means no request is ever the operator**, by design. See the README's [Authentication](README.md#authentication) section |
 | `FRONTEND_URL` | recommended | CORS allowlist origin; set to `https://your-frontend.vercel.app` in production |
 | `ENV` | optional | `development` / `production` |
 | `PORT` | optional | Defaults to `8080` |
@@ -65,13 +65,10 @@ For the frontend, create `frontend/.env`:
 
 ```dotenv
 VITE_API_URL=http://localhost:8080
-
-# Optional. Enables the Cases tab status buttons by sending X-API-Key.
-# A browser bundle cannot hold a secret: whatever is set here is inlined at
-# build time and readable in devtools. Only set it where the bundle is not
-# public, and treat the value as disclosed. Empty or whitespace counts as unset.
-VITE_API_KEY=the_same_value_as_SOCTRIAGE_API_KEYS
 ```
+
+There is no frontend key variable. Every browser gets its own session token
+automatically, and an operator types the admin key into the page at runtime.
 
 ## Database
 
@@ -137,7 +134,7 @@ The backend is organized so each kind of change has an obvious home:
 | A change to the AI report shape | The Pydantic models in [`backend/models.py`](backend/models.py) and the prompt + parsing in [`backend/services/ai_engine.py`](backend/services/ai_engine.py) |
 | Case workflow / status transitions | [`backend/services/case_manager.py`](backend/services/case_manager.py). Opens, updates, and persists cases via SQLAlchemy sessions |
 | A new persisted field on a case | A new column on `CaseRow` in [`backend/database.py`](backend/database.py) and a migration for it (see [docs/MIGRATIONS.md](docs/MIGRATIONS.md)); update the case-manager methods and the response models in `models.py` |
-| Authentication on a route | [`backend/auth.py`](backend/auth.py), then call `_require_key(request)` as the first statement of the handler, ahead of the limiter and the case lookup |
+| Authentication on a route | [`backend/auth.py`](backend/auth.py). A case write calls `_require_writer(request)` as its first statement, ahead of the limiter and the case lookup, then passes `_scope(caller)` to the `CaseManager` so another owner's case is the same `None` (404) as a missing one. A read passes `_scope(resolve_caller(request))` |
 | A new abuse control | [`backend/limits.py`](backend/limits.py). Add the check to `Limiter`, wire it through `build_limiter()`, and document the variable in `.env.example` |
 | A new audited action | [`backend/audit.py`](backend/audit.py). Note that entries carry no free text and no key material, and adding a field means changing `ENTRY_FIELDS` deliberately |
 

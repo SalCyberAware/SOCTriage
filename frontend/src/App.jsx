@@ -5,24 +5,45 @@ const API = import.meta.env.VITE_API_URL || "https://soctriage-production.up.rai
 // Where the note below sends someone who wants to know why a button is missing.
 const README_AUTH_URL = "https://github.com/SalCyberAware/SOCTriage#authentication";
 
-// The API key for the case-write endpoints, if this build was given one.
+// Where the visitor's session token is kept. See sessionToken() below.
+const SESSION_TOKEN_STORAGE_KEY = "soctriage.sessionToken";
+
+// Used only when localStorage is unavailable (private mode, blocked storage):
+// the token then lasts as long as the page does.
+let fallbackSessionToken = null;
+
+// The random token that makes this browser the owner of the cases it opens.
 //
-// Deliberately absent from the hosted demo, and that is not an oversight: a
-// browser bundle cannot hold a secret. Whatever is set here is inlined into the
-// JavaScript at build time and readable by anyone who opens devtools, so a key
-// here is a published key. soctriage.vercel.app therefore ships without one and
-// the Cases tab shows a note in place of the status buttons, rather than
-// offering a button that can only ever return 401.
-//
-// Set it only where the bundle itself is not public -- an internal deployment,
-// a build behind SSO -- and treat the value as disclosed regardless. The
-// backend fails closed without SOCTRIAGE_API_KEYS set; see README Authentication.
-//
-// Read at call time rather than captured in a module constant so the tests can
-// vary it. Vite still inlines the literal at build time: the expression is
-// static either way.
-function apiKey() {
-  return (import.meta.env.VITE_API_KEY || "").trim();
+// Made with crypto.randomUUID() the first time it is needed and kept in
+// localStorage, then sent as X-Session-Token on every API call. The backend
+// stores only its SHA-256 next to each case it opens and shows a token only its
+// own cases, so it is not a secret from the person holding it; it is just what
+// tells one visitor's cases from another's. Clearing site data or switching
+// browsers makes a new token, and the old cases are out of reach from here.
+function sessionToken() {
+  try {
+    let token = localStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
+    if (!token) {
+      token = crypto.randomUUID();
+      localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+    }
+    return token;
+  } catch {
+    fallbackSessionToken ??= crypto.randomUUID();
+    return fallbackSessionToken;
+  }
+}
+
+// Headers for every API call: the session token always, and the operator's
+// API key when one has been typed in. There is deliberately no build-time key:
+// anything Vite inlines is readable by every visitor in devtools, so the key
+// exists only in this page's memory, for as long as the page is open, and is
+// never written to storage.
+function apiHeaders(adminKey, extra = {}) {
+  const headers = { ...extra, "X-Session-Token": sessionToken() };
+  const key = (adminKey || "").trim();
+  if (key) headers["X-API-Key"] = key;
+  return headers;
 }
 
 // Keys match the Severity / CaseStatus enum *values* from the API, which are
@@ -231,7 +252,17 @@ function ReportView({ result, onBack }) {
   );
 }
 
-function TriageTab() {
+function SessionNote() {
+  return (
+    <p className="session-note">
+      Cases you open are tied to this browser: only you see them here, and
+      clearing site data or switching browsers loses access to them.{" "}
+      <a href={README_AUTH_URL} target="_blank" rel="noreferrer">How this works</a>
+    </p>
+  );
+}
+
+function TriageTab({ adminKey }) {
   const [ioc, setIoc] = useState("");
   // The IOC type is derived during render, not stored by an effect. An explicit
   // pick from the select wins over auto-detection until the analyst types a new
@@ -270,7 +301,7 @@ function TriageTab() {
     try {
       const resp = await fetch(`${API}/api/triage`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: apiHeaders(adminKey, { "Content-Type": "application/json" }),
         body: JSON.stringify({
           ioc: ioc.trim(),
           ioc_type: iocType.toLowerCase(),
@@ -296,6 +327,7 @@ function TriageTab() {
         <div className="triage-hero-text">
           <h2>Submit IOC for Triage</h2>
           <p>Paste an IP, URL, domain, or hash. SOCTriage will enrich it across 11 threat intelligence engines and generate an AI-powered incident report with MITRE ATT&CK mapping.</p>
+          <SessionNote />
         </div>
       </div>
 
@@ -384,7 +416,7 @@ function HealthIndicator() {
 
     async function check() {
       try {
-        const resp = await fetch(`${API}/health`);
+        const resp = await fetch(`${API}/health`, { headers: apiHeaders() });
         if (!resp.ok) throw new Error();
         const data = await resp.json();
         if (!cancelled) setHealth(data.status === "ok" ? "online" : "degraded");
@@ -406,11 +438,10 @@ function HealthIndicator() {
   );
 }
 
-function CasesTab() {
-  // Whether this build can write at all. Everything else on the tab -- the
-  // list, the report, the MITRE techniques, the timeline -- renders the same
-  // either way; only the status buttons depend on it.
-  const canWrite = Boolean(apiKey());
+function CasesTab({ adminKey }) {
+  // Every case listed here is one this browser opened (or, with the admin key,
+  // any case), and the backend lets the same caller change it, so the status
+  // buttons are always offered.
   const [cases, setCases] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
@@ -419,10 +450,10 @@ function CasesTab() {
   // The bare fetch, with no state transitions in it, so the mount effect and
   // the post-write refresh can share one definition of the endpoint shape.
   const fetchCases = useCallback(async () => {
-    const r = await fetch(`${API}/api/cases`);
+    const r = await fetch(`${API}/api/cases`, { headers: apiHeaders(adminKey) });
     const data = await r.json();
     return Array.isArray(data) ? data.reverse() : [];
-  }, []);
+  }, [adminKey]);
 
   // Refresh after a write. Showing the spinner is wanted here, and setting
   // state synchronously inside an event handler is fine.
@@ -454,16 +485,9 @@ function CasesTab() {
   async function updateStatus(caseId, status) {
     setError("");
     try {
-      const headers = { "Content-Type": "application/json" };
-      // Only sent when this build has a key. Without one the buttons that call
-      // this are not rendered at all, so reaching here unkeyed takes a
-      // deliberate console call -- and the backend answers it with a 401.
-      const key = apiKey();
-      if (key) headers["X-API-Key"] = key;
-
       const resp = await fetch(`${API}/api/cases/${caseId}/status`, {
         method: "PATCH",
-        headers,
+        headers: apiHeaders(adminKey, { "Content-Type": "application/json" }),
         body: JSON.stringify({ status }),
       });
       if (!resp.ok) throw new Error(await describeError(resp));
@@ -478,6 +502,7 @@ function CasesTab() {
     <div style={{ padding: 64, textAlign: "center" }}>
       <div style={{ fontSize: 40, marginBottom: 12 }}>📭</div>
       <div style={{ color: "var(--muted)", fontFamily: "var(--mono)" }}>No cases yet. Run a triage to create one.</div>
+      <SessionNote />
     </div>
   );
 
@@ -487,6 +512,8 @@ function CasesTab() {
         <h2 style={{ margin: 0 }}>Cases <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 16 }}>({cases.length})</span></h2>
         <button className="btn-ghost" onClick={load}>↻ Refresh</button>
       </div>
+
+      <SessionNote />
 
       {error && <div className="error-banner" style={{ marginBottom: 16 }}>✗ {error}</div>}
 
@@ -507,28 +534,18 @@ function CasesTab() {
 
             {expanded === c.case_id && (
               <div className="case-detail fade-in">
-                {canWrite ? (
-                  <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {CASE_STATUSES.map(s => (
-                      <button
-                        key={s}
-                        className={`status-btn ${c.status === s ? "active" : ""}`}
-                        onClick={() => updateStatus(c.case_id, s)}
-                        style={{ "--btn-color": STATUS_COLOR[s] }}
-                      >
-                        {s.replace("_", " ")}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="auth-note">
-                    Changing a case requires an API key, and this build has none — the case
-                    below is read-only.{" "}
-                    <a href={README_AUTH_URL} target="_blank" rel="noreferrer">
-                      How authentication works
-                    </a>
-                  </p>
-                )}
+                <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {CASE_STATUSES.map(s => (
+                    <button
+                      key={s}
+                      className={`status-btn ${c.status === s ? "active" : ""}`}
+                      onClick={() => updateStatus(c.case_id, s)}
+                      style={{ "--btn-color": STATUS_COLOR[s] }}
+                    >
+                      {s.replace("_", " ")}
+                    </button>
+                  ))}
+                </div>
 
                 {c.report && (
                   <>
@@ -569,15 +586,15 @@ function CasesTab() {
   );
 }
 
-function DashboardTab() {
+function DashboardTab({ adminKey }) {
   const [stats, setStats] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/api/dashboard`)
+    fetch(`${API}/api/dashboard`, { headers: apiHeaders(adminKey) })
       .then(r => r.json())
       .then(setStats)
       .catch(() => {});
-  }, []);
+  }, [adminKey]);
 
   if (!stats) return <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", fontFamily: "var(--mono)" }}>Loading…</div>;
 
@@ -604,8 +621,53 @@ function DashboardTab() {
   );
 }
 
+/**
+ * Where the operator types the admin API key, at runtime.
+ *
+ * The key is held in React state only: never in localStorage, never in the
+ * bundle. Reloading the page forgets it, which is the point.
+ */
+function AdminKeyForm({ adminKey, onChange }) {
+  const [draft, setDraft] = useState("");
+
+  if (adminKey) {
+    return (
+      <div className="admin-key">
+        <span>Admin key in use for this page (not saved).</span>
+        <button className="btn-ghost" onClick={() => onChange("")}>Forget key</button>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      className="admin-key"
+      onSubmit={e => {
+        e.preventDefault();
+        onChange(draft.trim());
+        setDraft("");
+      }}
+    >
+      <label htmlFor="admin-key-input">Operator?</label>
+      <input
+        id="admin-key-input"
+        type="password"
+        autoComplete="off"
+        placeholder="Admin API key"
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+      />
+      <button className="btn-ghost" type="submit" disabled={!draft.trim()}>Use key</button>
+    </form>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("triage");
+  const [adminKey, setAdminKey] = useState("");
+
+  // Make the session token on first load, so it exists before any request.
+  useEffect(() => { sessionToken(); }, []);
 
   return (
     <>
@@ -938,8 +1000,8 @@ export default function App() {
           letter-spacing: 0.06em;
         }
 
-        .auth-note {
-          margin: 0 0 12px;
+        .session-note {
+          margin: 12px 0 16px;
           padding: 8px 12px;
           border: 1px solid var(--border);
           border-radius: 4px;
@@ -948,7 +1010,29 @@ export default function App() {
           line-height: 1.6;
         }
 
-        .auth-note a { color: var(--accent); }
+        .session-note a { color: var(--accent); }
+
+        .admin-key {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          margin-top: 48px;
+          font-size: 12px;
+          color: var(--muted);
+          font-family: var(--mono);
+        }
+
+        .admin-key input {
+          background: var(--surface);
+          border: 1px solid var(--border);
+          border-radius: 4px;
+          color: var(--text);
+          font-family: var(--mono);
+          font-size: 12px;
+          padding: 6px 10px;
+          min-width: 0;
+        }
 
         .status-btn:hover { border-color: var(--btn-color); color: var(--btn-color); }
         .status-btn.active { background: var(--btn-color); color: #000; border-color: var(--btn-color); font-weight: 700; }
@@ -1029,9 +1113,11 @@ export default function App() {
 
         <HealthIndicator />
 
-        {tab === "triage" && <TriageTab />}
-        {tab === "cases" && <CasesTab />}
-        {tab === "dashboard" && <DashboardTab />}
+        {tab === "triage" && <TriageTab adminKey={adminKey} />}
+        {tab === "cases" && <CasesTab adminKey={adminKey} />}
+        {tab === "dashboard" && <DashboardTab adminKey={adminKey} />}
+
+        <AdminKeyForm adminKey={adminKey} onChange={setAdminKey} />
       </div>
     </>
   );

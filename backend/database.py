@@ -78,6 +78,12 @@ class CaseRow(Base):
     report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     timeline: Mapped[list] = mapped_column(JSON, default=list)
 
+    # SHA-256 (hex) of the session token that created the case; see auth.py.
+    # NULL for cases from before ownership existed, which only the API key
+    # can see. Indexed because every visitor read filters on it. Last, where
+    # migration 0002 adds it, so a migrated table and a create_all() one match.
+    owner_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 
