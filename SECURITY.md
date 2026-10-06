@@ -61,6 +61,12 @@ These are known limitations of a portfolio project running on free hosting tiers
 - **Outdated browser compatibility** — only modern evergreen browsers are supported
 - **Reports from automated scanners** with no manual validation or proof of exploitability
 
+## API Key Handling
+
+- The Anthropic API key is read only from environment variables. It is never committed to the repository, and gitleaks scans the full git history for secrets with GitHub push protection enabled.
+- Production uses a dedicated service-account key that lives in its own workspace, with a monthly spend cap and an expiry date. The key is rotated before it expires.
+- The test suite mocks the Anthropic client, so developer machines need no key to run the tests.
+
 ## Safe Harbor
 
 Good-faith security research that follows this policy will not be pursued legally. Specifically: testing against a local clone of the repo is always fine; testing against the public demo at [soctriage.vercel.app](https://soctriage.vercel.app) is fine if you avoid disrupting other users, don't attempt to access cases that aren't yours, and avoid burning through the demo's Anthropic / ThreatScan quota.
