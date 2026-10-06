@@ -27,14 +27,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
+# CORS is FAIL CLOSED, for the same reason auth.py is: an allowlist that turns
+# into "*" when its variable goes missing is not an allowlist. With FRONTEND_URL
+# unset, no cross-origin request is allowed; same-origin and non-browser
+# clients are unaffected. Methods and headers are exactly what
+# frontend/src/App.jsx sends, and nothing in the app uses cookies, so
+# credentials stay off.
+CORS_ALLOW_METHODS = ["GET", "POST", "PATCH"]
+CORS_ALLOW_HEADERS = ["Content-Type", "X-API-Key"]
+
+
+def cors_allowed_origins() -> list[str]:
+    """The cross-origin allowlist: FRONTEND_URL, or nothing when it is unset."""
+    origin = os.getenv("FRONTEND_URL", "").strip()
+    return [origin] if origin else []
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL] if FRONTEND_URL != "*" else ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors_allowed_origins(),
+    allow_credentials=False,
+    allow_methods=CORS_ALLOW_METHODS,
+    allow_headers=CORS_ALLOW_HEADERS,
 )
 
 app.include_router(triage_router)
