@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Security
+
+- **Prompt-injection hardening in the report generator** (`backend/services/ai_engine.py`). The instructions moved into a system prompt, and the IOC, raw alert, analyst notes and ThreatScan verdict are sent inside an `<untrusted_alert_data>` block that the system prompt marks as data never to be followed as instructions. Angle brackets and ampersands in that data are escaped, so alert text cannot close its own tag. The report now comes back through a forced tool call with a JSON schema instead of free-text JSON, and the tool input is validated field by field. MITRE technique IDs must match the ATT&CK pattern (`T1234` or `T1234.567`) or the technique is dropped, and `mitre_url` is built from the ID rather than taken from the model. Severity has a floor from the enrichment verdict that the model cannot lower: `malicious` means at least `high`, `suspicious` at least `medium`; other verdicts set no floor.
+
 ### Fixed
 
 - **Backend crashed on startup against Postgres** after SQLAlchemy 2.1 was picked up through the unpinned `sqlalchemy>=2.0.30`. SQLAlchemy 2.1 maps a bare `postgresql://` URL to psycopg (v3), and only `psycopg2-binary` is installed. `database.py` now rewrites both `postgres://` and `postgresql://` to `postgresql+psycopg2://`, so the driver no longer depends on SQLAlchemy's default, and `requirements.txt` holds SQLAlchemy below 2.1. Postgres connections also carry a 10 second `connect_timeout`, so an unreachable database fails startup instead of hanging it.
