@@ -57,6 +57,7 @@ cp .env.example .env
 | `SOCTRIAGE_MAX_RAW_ALERT_CHARS` | optional | Length cap on `raw_alert`. Default `10000` |
 | `SOCTRIAGE_MAX_IOC_CHARS` | optional | Length cap on `ioc`. Default `256` |
 | `SOCTRIAGE_MAX_NOTE_CHARS` | optional | Length cap on `analyst_notes`, `note`, `resolution`. Default `2000` |
+| `SOCTRIAGE_ENABLE_API_DOCS` | optional, development only | `1`, `true` or `yes` serves `/docs`, `/redoc` and `/openapi.json`. Unset means they return 404. Never set it in production |
 
 Every `SOCTRIAGE_*` limit falls back to its default when unset, and also when
 the value is junk or non-positive, so a typo cannot silently disable a cap.

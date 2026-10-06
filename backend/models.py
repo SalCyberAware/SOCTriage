@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -24,13 +24,28 @@ class IOCType(str, Enum):
     HASH   = "hash"
 
 
+# ── Schema ceilings on free text ──────────────────────────────────────────────
+#
+# A hard backstop, not the limit a user normally meets. limits.py enforces the
+# real caps (10,000 / 256 / 2,000 characters by default, tunable by env) and
+# answers with a plain 400 that names the field and the cap. These ceilings sit
+# ten times or more above those defaults, so normal oversize input still gets
+# that friendly 400; only something absurd is refused here, with a 422, before
+# any handler code runs. If a SOCTRIAGE_MAX_* cap is ever raised past one of
+# these, the ceiling wins, so raise both together.
+MAX_RAW_ALERT_SCHEMA_CHARS = 100_000
+MAX_IOC_SCHEMA_CHARS = 4_096
+MAX_NOTE_SCHEMA_CHARS = 20_000
+
+
 # ── Alert Intake ──────────────────────────────────────────────────────────────
 
 class AlertIntake(BaseModel):
-    raw_alert:        str | None = None   # Raw alert text from SIEM
-    ioc:              str                    # IP, URL, domain, or hash
+    # Raw alert text from SIEM
+    raw_alert:        str | None = Field(default=None, max_length=MAX_RAW_ALERT_SCHEMA_CHARS)
+    ioc:              str = Field(max_length=MAX_IOC_SCHEMA_CHARS)  # IP, URL, domain, or hash
     ioc_type:         IOCType | None = None
-    analyst_notes:    str | None = None
+    analyst_notes:    str | None = Field(default=None, max_length=MAX_NOTE_SCHEMA_CHARS)
     severity_override: Severity | None = None
 
     class Config:

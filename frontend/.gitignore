@@ -1,2 +1,7 @@
 
 node_modules/
+
+# Vercel serves the security headers and the CSP from vercel.json. It must
+# always be committed, so un-ignore it explicitly in case a broader pattern
+# above or in the root .gitignore ever matches it.
+!vercel.json

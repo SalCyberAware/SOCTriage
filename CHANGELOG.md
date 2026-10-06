@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Security
 
+- **Web hardening.** The backend now sends `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy` and `Strict-Transport-Security` on every response, through a pure ASGI middleware outside CORS so preflights and errors carry them too. The new `frontend/vercel.json` sends the same four on the site, plus a Content-Security-Policy in Report-Only mode that allows the Railway API origin and Google Fonts. `/docs`, `/redoc` and `/openapi.json` now return 404 unless `SOCTRIAGE_ENABLE_API_DOCS` is set. Every free-text field has a schema `max_length` (100,000 for `raw_alert`, 4,096 for `ioc`, 20,000 for notes and resolutions), ten times or more above the `limits.py` caps so their friendly 400 still answers normal oversize input. When `ioc_type` is given, `POST /api/triage` checks the IOC against it and returns 400 on a mismatch, before enrichment, the AI call and the rate limiter.
+
+### Changed
+
+- IPv6 addresses are now detected as `ip` rather than `domain`, in both the frontend and `detect_ioc_type`, and the triage form shows the backend's error message instead of a bare status code.
+
 - **Visitors see only their own cases** (`backend/auth.py`, `backend/services/case_manager.py`, migration `0002`). The frontend makes a random session token with `crypto.randomUUID()` on first load, keeps it in `localStorage`, and sends it as `X-Session-Token` on every call. `POST /api/triage` now requires the token and stores its SHA-256 in the new indexed, nullable `cases.owner_hash` column. The list, get and dashboard routes return only the caller's cases, and another owner's case returns the same `404` as a missing one. Owners can update status, add notes and close their own cases without a key. A valid `X-API-Key` still sees and changes every case. Cases created before this change have no owner, so only the key reaches them. `X-Session-Token` was added to the CORS allowed headers.
 - **No API key can be built into the frontend.** `VITE_API_KEY` is gone. The operator types the key into the page at runtime; it is held in memory only and never written to browser storage.
 

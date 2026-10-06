@@ -78,6 +78,12 @@ What this does and does not protect against:
 - It does not authenticate a person. Anyone holding a token (for example, someone with access to the same browser profile) has that token's cases. Clearing site data loses access to them from that browser.
 - The operator key is never built into the frontend bundle; there is no `VITE_API_KEY`. It is only typed in at runtime, held in page memory, and never written to browser storage.
 
+## Web Hardening
+
+- Every backend response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin` and `Strict-Transport-Security`. The frontend sends the same from `frontend/vercel.json`, plus a Content-Security-Policy in **Report-Only** mode while it is checked against the live site. A way around the enforced headers is in scope; the CSP not blocking something is expected until it is switched to enforcing.
+- `/docs`, `/redoc` and `/openapi.json` are off in production and only served when `SOCTRIAGE_ENABLE_API_DOCS` is set.
+- Every free-text request field has a schema `max_length` above the abuse-control caps, and a stated `ioc_type` must match the IOC.
+
 ## API Key Handling
 
 - The Anthropic API key is read only from environment variables. It is never committed to the repository, and gitleaks scans the full git history for secrets with GitHub push protection enabled.
