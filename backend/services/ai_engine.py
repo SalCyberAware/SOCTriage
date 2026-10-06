@@ -93,9 +93,13 @@ Report guidance:
 - severity: low, medium, high, or critical, based on the evidence.
 - summary: a 2 to 3 sentence executive summary.
 - affected_assets: assets that are potentially affected.
-- threat_type: for example Malware, C2, Phishing, Scanning.
+- threat_type: for example Malware, C2, Phishing, Scanning. When the evidence \
+shows no adversary activity, say so, for example "No threat identified".
 - mitre_techniques: MITRE ATT&CK techniques that apply, each with a real \
-technique ID such as T1071 or T1059.001.
+technique ID such as T1071 or T1059.001. Map a technique only when the \
+evidence shows adversary behaviour. Do not map routine or expected activity, \
+such as an ordinary DNS lookup, to a technique because it resembles one. A \
+benign or clean alert may have an empty list, and that is a valid answer.
 - recommended_actions: concrete response actions.
 - playbook: ordered investigation and response steps."""
 
@@ -114,6 +118,10 @@ REPORT_TOOL: ToolParam = {
             "threat_type": {"type": "string"},
             "mitre_techniques": {
                 "type": "array",
+                "description": (
+                    "Techniques backed by evidence of adversary behaviour. "
+                    "Empty when the alert shows none."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {

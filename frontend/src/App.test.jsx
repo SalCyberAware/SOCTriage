@@ -184,6 +184,68 @@ describe("IOC type derivation", () => {
   });
 });
 
+// A benign alert can come back with no MITRE techniques at all. The report
+// view says so instead of dropping the section, and still renders the rest.
+describe("Report view MITRE techniques", () => {
+  const BENIGN_RESPONSE = {
+    ...TRIAGE_RESPONSE,
+    enrichment: { ...TRIAGE_RESPONSE.enrichment, ioc: "8.8.8.8", ioc_type: "ip", verdict: "clean", score: 0 },
+    report: {
+      ...TRIAGE_RESPONSE.report,
+      title: "Outbound DNS query to a public resolver",
+      severity: "low",
+      threat_type: "No threat identified",
+      mitre_techniques: [],
+    },
+  };
+
+  async function triage(response) {
+    installFetch({ onTriage: response });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(iocInput(), "8.8.8.8");
+    await user.click(runTriage());
+    await screen.findByText(response.report.title);
+  }
+
+  it("renders a report with an empty technique list", async () => {
+    await triage(BENIGN_RESPONSE);
+
+    expect(screen.getByText("No threat identified")).toBeInTheDocument();
+    expect(screen.getByText("MITRE ATT&CK Techniques")).toBeInTheDocument();
+    expect(screen.getByText(/None mapped/)).toBeInTheDocument();
+    expect(screen.queryByText(/attack\.mitre\.org/)).not.toBeInTheDocument();
+  });
+
+  it("renders a report whose technique list is missing", async () => {
+    const { mitre_techniques: _omitted, ...report } = BENIGN_RESPONSE.report;
+    await triage({ ...BENIGN_RESPONSE, report });
+
+    expect(screen.getByText(/None mapped/)).toBeInTheDocument();
+  });
+
+  it("lists techniques when there are some", async () => {
+    await triage({
+      ...TRIAGE_RESPONSE,
+      report: {
+        ...TRIAGE_RESPONSE.report,
+        mitre_techniques: [
+          {
+            technique_id: "T1071.001",
+            technique_name: "Web Protocols",
+            tactic: "Command and Control",
+            description: "Beaconing over HTTPS.",
+            mitre_url: "https://attack.mitre.org/techniques/T1071/001/",
+          },
+        ],
+      },
+    });
+
+    expect(screen.getByText("T1071.001")).toBeInTheDocument();
+    expect(screen.queryByText(/None mapped/)).not.toBeInTheDocument();
+  });
+});
+
 describe("Cases list loading", () => {
   const CASE_ROW = {
     case_id: "CASE0001",

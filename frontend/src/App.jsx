@@ -204,14 +204,18 @@ function ReportView({ result, onBack }) {
         </div>
       </div>
 
-      {r.mitre_techniques?.length > 0 && (
-        <div className="report-section">
-          <div className="section-label">MITRE ATT&CK Techniques</div>
+      <div className="report-section">
+        <div className="section-label">MITRE ATT&CK Techniques</div>
+        {r.mitre_techniques?.length > 0 ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 10 }}>
             {r.mitre_techniques.map((t, i) => <MitreTag key={i} t={t} />)}
           </div>
-        </div>
-      )}
+        ) : (
+          <span style={{ color: "var(--muted)", fontSize: 13 }}>
+            None mapped. The evidence shows no adversary behaviour.
+          </span>
+        )}
+      </div>
 
       {playbookSteps.length > 0 && (
         <div className="report-section">

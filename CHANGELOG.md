@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- **Benign alerts no longer get forced MITRE mappings** (`backend/services/ai_engine.py`). The system prompt now tells the model to map ATT&CK techniques only when the evidence shows adversary behaviour, that a benign or clean alert may have an empty technique list, and that `threat_type` can say so, for example "No threat identified". The report view now always shows the MITRE section and reads "None mapped" when the list is empty, instead of hiding the section. The severity floor and the prompt-injection protections are unchanged.
+
 - IPv6 addresses are now detected as `ip` rather than `domain`, in both the frontend and `detect_ioc_type`, and the triage form shows the backend's error message instead of a bare status code.
 
 - **Visitors see only their own cases** (`backend/auth.py`, `backend/services/case_manager.py`, migration `0002`). The frontend makes a random session token with `crypto.randomUUID()` on first load, keeps it in `localStorage`, and sends it as `X-Session-Token` on every call. `POST /api/triage` now requires the token and stores its SHA-256 in the new indexed, nullable `cases.owner_hash` column. The list, get and dashboard routes return only the caller's cases, and another owner's case returns the same `404` as a missing one. Owners can update status, add notes and close their own cases without a key. A valid `X-API-Key` still sees and changes every case. Cases created before this change have no owner, so only the key reaches them. `X-Session-Token` was added to the CORS allowed headers.
