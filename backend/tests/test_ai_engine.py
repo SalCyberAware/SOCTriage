@@ -289,6 +289,54 @@ def test_generate_report_fills_defaults_for_missing_fields(
     assert report.playbook == []
 
 
+def test_benign_report_with_no_techniques_is_valid(monkeypatch, make_enrichment):
+    """A clean alert answered with an empty technique list is a complete report."""
+    benign = _payload(
+        title="Outbound DNS query to a public resolver",
+        severity="low",
+        summary="WS-07 queried a public DNS resolver. No adversary activity seen.",
+        affected_assets=["WS-07"],
+        threat_type="No threat identified",
+        mitre_techniques=[],
+        recommended_actions=["Close as benign."],
+        playbook=["Confirm the resolver is approved", "Close the alert"],
+    )
+    _install_client(monkeypatch, lambda **_: _tool_message(benign))
+
+    report = _run(
+        make_enrichment(ioc="8.8.8.8", verdict="clean", score=0),
+        _alert(
+            raw_alert="Outbound DNS query from workstation WS-07 to a public resolver",
+            ioc="8.8.8.8",
+            analyst_notes=None,
+        ),
+    )
+
+    assert report.mitre_techniques == []
+    assert report.threat_type == "No threat identified"
+    assert report.severity == Severity.LOW
+    assert report.title == benign["title"]
+    assert report.recommended_actions == ["Close as benign."]
+    # It serializes with an empty list, which is what the API returns.
+    assert report.model_dump(mode="json")["mitre_techniques"] == []
+
+
+def test_prompt_allows_an_empty_technique_list(monkeypatch, make_enrichment):
+    captured = _install_client(monkeypatch, lambda **_: _tool_message(_payload()))
+
+    _run(make_enrichment())
+
+    kwargs = captured["kwargs"]
+    system = kwargs["system"]
+    assert "evidence shows adversary behaviour" in system
+    assert "may have an empty list" in system
+    assert "No threat identified" in system
+    techniques = kwargs["tools"][0]["input_schema"]["properties"]["mitre_techniques"]
+    # Still required, so the model always answers the question, but may be empty.
+    assert "mitre_techniques" in kwargs["tools"][0]["input_schema"]["required"]
+    assert "minItems" not in techniques
+
+
 # ── MITRE technique validation ───────────────────────────────────────────────
 
 

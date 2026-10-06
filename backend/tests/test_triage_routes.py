@@ -395,6 +395,35 @@ def test_triage_endpoint_applies_severity_override(
     assert fetched["severity"] == "critical"
 
 
+def test_triage_endpoint_round_trips_a_report_with_no_techniques(
+    client, monkeypatch, make_enrichment, make_report
+):
+    """A benign report with an empty technique list persists and reads back."""
+    enrichment = make_enrichment(ioc="8.8.8.8", verdict="clean", score=0)
+    report = make_report(ioc="8.8.8.8", verdict="clean", score=0).model_copy(
+        update={"threat_type": "No threat identified", "mitre_techniques": []}
+    )
+    _patch_triage_externals(monkeypatch, enrichment, report)
+
+    response = client.post(
+        "/api/triage",
+        json={
+            "ioc": "8.8.8.8",
+            "ioc_type": "ip",
+            "raw_alert": "Outbound DNS query from workstation WS-07 to a public resolver",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["report"]["mitre_techniques"] == []
+    assert body["report"]["threat_type"] == "No threat identified"
+
+    fetched = client.get(f"/api/cases/{body['case_id']}").json()
+    assert fetched["report"]["mitre_techniques"] == []
+    assert fetched["report"]["threat_type"] == "No threat identified"
+
+
 def test_triage_endpoint_returns_422_when_ioc_missing(client):
     """ioc is the only required field on AlertIntake; omitting it is a 422."""
     response = client.post("/api/triage", json={"ioc_type": "ip"})
