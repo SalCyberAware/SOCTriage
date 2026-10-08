@@ -303,6 +303,9 @@ class TestWriteIsolation:
                 "case_id": visitors["case_a"],
                 "ip": "testclient",
                 "authenticated": False,
+                # Named by its hash prefix, never by the token itself.
+                "actor": "owner",
+                "actor_id": auth.owner_hash(SESSION_TOKEN_A)[:12],
             }
         ]
 
