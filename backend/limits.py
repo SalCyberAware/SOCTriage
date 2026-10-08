@@ -23,6 +23,7 @@ upgrade. All limits are env-configurable with conservative defaults.
 """
 from __future__ import annotations
 
+import ipaddress
 import math
 import os
 import time
@@ -68,23 +69,60 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def client_ip(request: Any) -> str:
-    """Resolve the client IP behind a proxy.
+# Production unless this is set to "development" explicitly, so a deploy with
+# the variable missing or misspelled keys the limit the safe way.
+ENV_VAR = "SOCTRIAGE_ENV"
 
-    Behind Railway's proxy the real client is the leftmost entry of
-    ``X-Forwarded-For``; this trusts the platform to set and sanitize that header.
-    A client that sets the header itself, reaching the app directly, could spoof
-    its identity here -- the trust is in Railway terminating every inbound
-    connection. Falls back to the direct socket peer for local/dev use.
+# IPv6 clients usually hold a whole prefix, so they are grouped by /56 to stop
+# one visitor rotating addresses inside their own allocation.
+_IPV6_KEY_PREFIX = 56
+
+
+def is_production() -> bool:
+    """Whether this process runs as production (the default)."""
+    return os.getenv(ENV_VAR, "").strip().lower() != "development"
+
+
+def _ip_key(value: str | None) -> str | None:
+    """Rate-limit key for one IP string, or None if it is not a single valid IP.
+
+    IPv4 is keyed as is; IPv6 is keyed by its /56 network.
+    """
+    if not value:
+        return None
+    try:
+        ip = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+    if ip.version == 6:
+        network = ipaddress.ip_network((int(ip), _IPV6_KEY_PREFIX), strict=False)
+        return str(network)
+    return str(ip)
+
+
+def client_ip(request: Any) -> str:
+    """Resolve the rate-limit key for the client behind Railway's proxy.
+
+    In production the key is ``X-Real-IP``: Railway's edge sets it to the real
+    visitor and overwrites any value the visitor sends. ``X-Forwarded-For`` is
+    never used there, because a visitor can prepend their own entries to it and
+    its rightmost entry is a varying internal hop. A missing or invalid
+    ``X-Real-IP`` falls back to the socket peer, not to ``X-Forwarded-For``, so
+    a stripped header cannot reopen that hole.
+
+    Outside production the leftmost ``X-Forwarded-For`` entry is used, falling
+    back to the socket peer, for local and dev use.
 
     Takes anything with ``.headers`` and ``.client`` (a Starlette ``Request``),
     so this module stays independent of the web framework and easy to unit test.
     """
+    peer: str = (request.client.host if request.client else None) or "unknown"
+    if is_production():
+        return _ip_key(request.headers.get("x-real-ip")) or peer
     forwarded: str | None = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()
-    peer: str | None = request.client.host if request.client else None
-    return peer or "unknown"
+    return peer
 
 
 class Limiter:

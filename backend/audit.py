@@ -97,9 +97,10 @@ def build_entry(
     reports the case it just opened), and it stays optional for a future write
     that does not.
 
-    ``ip`` comes from :func:`limits.client_ip`, i.e. the leftmost
-    X-Forwarded-For entry behind Railway's proxy, falling back to the socket
-    peer. ``now`` is injectable for tests; production passes nothing.
+    ``ip`` comes from :func:`limits.client_ip`, i.e. the rate-limit key: in
+    production the X-Real-IP Railway's edge sets (an IPv6 client as its /56),
+    falling back to the socket peer. ``now`` is injectable for tests;
+    production passes nothing.
     """
     return {
         "ts": (now or datetime.now(UTC)).isoformat(),

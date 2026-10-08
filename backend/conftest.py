@@ -69,6 +69,18 @@ def _configured_api_key(monkeypatch):
     monkeypatch.setenv("SOCTRIAGE_API_KEYS", TEST_API_KEY)
 
 
+@pytest.fixture(autouse=True)
+def _development_env(monkeypatch):
+    """Run each test as development unless it opts into production.
+
+    Production keys the rate limit on X-Real-IP (see limits.client_ip). The
+    suite drives distinct clients through X-Forwarded-For, the development key,
+    so it runs as development by default. Tests of the production key set
+    SOCTRIAGE_ENV themselves.
+    """
+    monkeypatch.setenv("SOCTRIAGE_ENV", "development")
+
+
 @pytest.fixture
 def client(_configured_api_key) -> TestClient:
     """A TestClient that presents a valid API key and a session token.
