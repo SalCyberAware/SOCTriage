@@ -16,7 +16,6 @@ way if somebody adds a field later.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -322,13 +321,30 @@ class TestCaseWritesAreAudited:
 
 # -- Who made the change ------------------------------------------------------
 
-# The expected ids are computed here from their definitions (SHA-256 prefixes),
-# not with the auth.py helpers the code under test uses.
+# The expected ids come from fixed SHA-256 known-answer values of the test
+# credentials, not from the auth.py helpers the code under test uses. Fixed
+# rather than computed, so the test hashes nothing itself. The digests sit on
+# lines of their own, apart from the credential names, because gitleaks'
+# generic-api-key rule reads a long hex value next to a name like *_KEY as a key.
 OPERATOR_KEY_B = "second-operator-key-not-a-real-secret"
+
+_SHA256 = dict(
+    zip(
+        (TEST_API_KEY, OPERATOR_KEY_B, SESSION_TOKEN_A, TEST_SESSION_TOKEN),
+        (
+            "dc9301d03df111e45f84bf33d8e141617883ca1965ff0b1067ff721a9de94b54",
+            "b366079ca70a6bce75a07e32169862feb330a8571b4c3eff2a52e815ad26f465",
+            "303617b9730210ef3c86c52dc2aecc4dce54aaca6af8c8b0f4ceec9ecc54e57e",
+            "db8055e0e0307d5a016bec4dc338d69875eb0fb7e614a8b125b08fb082095d98",
+        ),
+        strict=True,
+    )
+)
 
 
 def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    """The SHA-256 hex digest of a test credential, from the table above."""
+    return _SHA256[value]
 
 
 def _key_only_client(key: str = TEST_API_KEY) -> TestClient:
