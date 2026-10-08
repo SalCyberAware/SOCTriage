@@ -77,10 +77,18 @@ def _audit_case_write(endpoint: str, case_id: str, ip: str, caller: Caller) -> N
 
     ``authenticated`` means the API key, as it does everywhere in the trail. An
     owner changing their own case through a session token is recorded as
-    unauthenticated: the token identifies a browser, not an operator.
+    unauthenticated: the token identifies a browser, not an operator. The
+    actor says which: the operator key's fingerprint, or the owner's hash
+    prefix (see :meth:`auth.Caller.audit_actor`).
     """
+    actor, actor_id = caller.audit_actor()
     audit.record(
-        endpoint=endpoint, case_id=case_id, ip=ip, authenticated=caller.is_admin
+        endpoint=endpoint,
+        case_id=case_id,
+        ip=ip,
+        authenticated=caller.is_admin,
+        actor=actor,
+        actor_id=actor_id,
     )
 
 
@@ -157,11 +165,15 @@ async def triage_alert(alert: AlertIntake, request: Request):
     # This route needs no key, but it can be given one, and the trail records
     # which it was. Neither the raw_alert nor the analyst notes are logged --
     # only that a case was opened, and by whom.
+    caller = resolve_caller(request)
+    actor, actor_id = caller.audit_actor()
     audit.record(
         endpoint="POST /api/triage",
         case_id=case.case_id,
         ip=ip,
-        authenticated=resolve_caller(request).is_admin,
+        authenticated=caller.is_admin,
+        actor=actor,
+        actor_id=actor_id,
     )
     return TriageResponse(case_id=case.case_id, enrichment=enrichment, report=report)
 

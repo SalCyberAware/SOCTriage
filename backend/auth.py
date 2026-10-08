@@ -134,23 +134,45 @@ def configured_keys() -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
-def key_is_valid(presented: str | None) -> bool:
-    """Whether ``presented`` matches a configured key, in constant time.
+# Length of :func:`key_fingerprint`.
+KEY_FINGERPRINT_CHARS = 8
 
-    ``False`` when no key is configured (fail closed) and when ``presented`` is
+
+def key_fingerprint(key: str) -> str:
+    """A short public name for a configured key: the first 8 hex characters of
+    its SHA-256.
+
+    For the audit trail, which has to say which operator key made a change
+    without holding the key. Eight hex characters tell a handful of rotating
+    keys apart and are no help in recovering a long random one.
+    """
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:KEY_FINGERPRINT_CHARS]
+
+
+def matched_key(presented: str | None) -> str | None:
+    """The configured key ``presented`` matches, in constant time, or ``None``.
+
+    ``None`` when no key is configured (fail closed) and when ``presented`` is
     ``None`` or empty -- an absent header is not a match for anything.
     """
     keys = configured_keys()
     if not keys or not presented:
-        return False
+        return None
 
     supplied = presented.encode("utf-8")
-    # Deliberately not `any(...)`: that would stop at the first match and make
-    # the response time depend on which key was used. `|=` compares them all.
-    matched = False
+    # Deliberately not `any(...)` or an early return: either would stop at the
+    # first match and make the response time depend on which key was used.
+    # Every key is compared; the match is only remembered.
+    found: str | None = None
     for key in keys:
-        matched |= hmac.compare_digest(supplied, key.encode("utf-8"))
-    return matched
+        if hmac.compare_digest(supplied, key.encode("utf-8")):
+            found = key
+    return found
+
+
+def key_is_valid(presented: str | None) -> bool:
+    """Whether ``presented`` matches a configured key, in constant time."""
+    return matched_key(presented) is not None
 
 
 def require_api_key(request: Any) -> None:
@@ -169,9 +191,8 @@ def require_api_key(request: Any) -> None:
 def is_authenticated(request: Any) -> bool:
     """Whether a request carries a valid key, without requiring that it does.
 
-    For the ungated routes, which record in the audit trail whether the caller
-    identified itself. Defined in terms of :func:`require_api_key` so the flag
-    means exactly "would have passed the gate" and cannot drift away from it.
+    Defined in terms of :func:`require_api_key` so the flag means exactly
+    "would have passed the gate" and cannot drift away from it.
     """
     try:
         require_api_key(request)
@@ -205,20 +226,54 @@ def session_owner_hash(request: Any) -> str | None:
 class Caller:
     """Who a request is, as far as case access goes.
 
-    ``is_admin`` when it carries a valid API key; ``owner_hash`` when it
-    carries a usable session token. Both can be set. Neither set is an
-    anonymous caller, who owns nothing and sees nothing.
+    ``is_admin`` when it carries a valid API key, with ``key_fingerprint``
+    naming which one; ``owner_hash`` when it carries a usable session token.
+    Both can be set. Neither set is an anonymous caller, who owns nothing and
+    sees nothing.
     """
 
     is_admin: bool
     owner_hash: str | None
+    key_fingerprint: str | None = None
+
+    def audit_actor(self) -> tuple[str, str | None]:
+        """Who made a write, for the audit trail: ``(actor, actor_id)``.
+
+        The key wins when both credentials are present, because that is the
+        authority the write ran under: a keyed caller is scoped to every case.
+        An owner is named by the first 12 characters of its owner hash. A write
+        only gets this far for an owner when the case's ``owner_hash`` equals
+        the caller's (the scoped lookup checks it, and triage stores it), so
+        that is the case's existing hash. Neither is ever the raw credential.
+        """
+        if self.is_admin and self.key_fingerprint is not None:
+            return ACTOR_OPERATOR, self.key_fingerprint
+        if self.owner_hash is not None:
+            return ACTOR_OWNER, self.owner_hash[:OWNER_ID_CHARS]
+        return ACTOR_NONE, None
+
+
+# The three actors an audit entry can name.
+ACTOR_OPERATOR = "operator"
+ACTOR_OWNER = "owner"
+ACTOR_NONE = "none"
+
+# How much of an owner hash the audit trail keeps.
+OWNER_ID_CHARS = 12
 
 
 def resolve_caller(request: Any) -> Caller:
-    """Identify a request without requiring anything of it."""
+    """Identify a request without requiring anything of it.
+
+    One key comparison serves both ``is_admin`` and the fingerprint, so the two
+    cannot disagree. It agrees with :func:`require_api_key` too: both come down
+    to :func:`matched_key`, which fails closed with no key configured.
+    """
+    key = matched_key(request.headers.get(API_KEY_HEADER))
     return Caller(
-        is_admin=is_authenticated(request),
+        is_admin=key is not None,
         owner_hash=session_owner_hash(request),
+        key_fingerprint=key_fingerprint(key) if key is not None else None,
     )
 
 

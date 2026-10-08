@@ -1,9 +1,9 @@
 """Audit trail for every write the SOCTriage API performs.
 
 One line per successful write, recording who did what: when, which endpoint,
-which case, the client IP as resolved behind Railway's proxy, and whether the
-caller presented a valid API key. All four writes are covered, including the
-unauthenticated POST /api/triage -- "an anonymous caller from 203.0.113.7
+which case, the client IP as resolved behind Railway's proxy, whether the
+caller presented a valid API key, and which actor made the change. All four
+writes are covered, including the keyless POST /api/triage -- "an anonymous caller from 203.0.113.7
 opened case 4FA22FE3" is exactly the sort of thing the trail exists to answer.
 
 
@@ -44,7 +44,12 @@ shape of the record does not change either way.
 WHAT IS NEVER RECORDED, and how that is kept true:
 
   * No key material. Nothing in this module takes a key, a header or a
-    request; the caller passes a resolved boolean.
+    request; the caller passes a resolved boolean and an actor. The actor is
+    "operator" with the first 8 hex characters of the SHA-256 of the key that
+    was used, "owner" with the first 12 characters of the case's owner hash
+    (itself the SHA-256 of the session token), or "none". :func:`build_entry`
+    refuses an ``actor_id`` that is not lowercase hex of exactly that length,
+    so a raw key or token cannot be passed through by mistake.
   * No ``raw_alert``, no ``analyst_notes``, no note or resolution text. The
     entry records THAT a change happened, never its content. Again
     structural: :func:`build_entry` has no parameter such a string could
@@ -56,6 +61,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from datetime import UTC, datetime
 
@@ -63,7 +69,17 @@ LOGGER_NAME = "soctriage.audit"
 
 # The exact keys of an audit entry. Exported so the tests can assert that no
 # extra field -- above all no free text -- ever sneaks into the record.
-ENTRY_FIELDS = frozenset({"ts", "event", "endpoint", "case_id", "ip", "authenticated"})
+ENTRY_FIELDS = frozenset(
+    {"ts", "event", "endpoint", "case_id", "ip", "authenticated", "actor", "actor_id"}
+)
+
+# What an ``actor_id`` must look like for each actor: lowercase hex of a fixed
+# length, or nothing. Mirrors auth.key_fingerprint and auth.OWNER_ID_CHARS.
+_ACTOR_ID_PATTERNS: dict[str, re.Pattern[str] | None] = {
+    "operator": re.compile(r"[0-9a-f]{8}"),
+    "owner": re.compile(r"[0-9a-f]{12}"),
+    "none": None,
+}
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -83,6 +99,8 @@ def build_entry(
     endpoint: str,
     ip: str,
     authenticated: bool,
+    actor: str,
+    actor_id: str | None,
     case_id: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
@@ -101,7 +119,22 @@ def build_entry(
     production the X-Real-IP Railway's edge sets (an IPv6 client as its /56),
     falling back to the socket peer. ``now`` is injectable for tests;
     production passes nothing.
+
+    ``actor`` and ``actor_id`` come from :meth:`auth.Caller.audit_actor`. A
+    value that does not fit the actor's shape raises ``ValueError`` rather
+    than being logged: an unknown actor, an id on "none", or an id that is not
+    a short hex fingerprint (which a raw key or token never is).
     """
+    if actor not in _ACTOR_ID_PATTERNS:
+        raise ValueError(f"unknown audit actor {actor!r}")
+    pattern = _ACTOR_ID_PATTERNS[actor]
+    if pattern is None:
+        if actor_id is not None:
+            raise ValueError(f"actor {actor!r} carries no id")
+    elif actor_id is None or not pattern.fullmatch(actor_id):
+        # The value is deliberately left out of the message: if it is a key
+        # that arrived here by mistake, the error must not log it instead.
+        raise ValueError(f"actor_id is not a valid {actor} fingerprint")
     return {
         "ts": (now or datetime.now(UTC)).isoformat(),
         "event": "write",
@@ -109,6 +142,8 @@ def build_entry(
         "case_id": case_id,
         "ip": ip,
         "authenticated": authenticated,
+        "actor": actor,
+        "actor_id": actor_id,
     }
 
 
@@ -117,6 +152,8 @@ def record(
     endpoint: str,
     ip: str,
     authenticated: bool,
+    actor: str,
+    actor_id: str | None,
     case_id: str | None = None,
 ) -> None:
     """Emit one audit entry as a JSON line on stdout.
@@ -126,6 +163,11 @@ def record(
     leaves no entry, because none of them changed anything.
     """
     entry = build_entry(
-        endpoint=endpoint, ip=ip, authenticated=authenticated, case_id=case_id
+        endpoint=endpoint,
+        ip=ip,
+        authenticated=authenticated,
+        actor=actor,
+        actor_id=actor_id,
+        case_id=case_id,
     )
     logger.info(json.dumps(entry, separators=(",", ":")))

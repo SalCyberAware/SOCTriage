@@ -375,7 +375,7 @@ to answer.
 One JSON object per line on stdout, at INFO:
 
 ```json
-{"ts":"2026-09-19T12:34:56.789012+00:00","event":"write","endpoint":"PATCH /api/cases/{case_id}/status","case_id":"4FA22FE3","ip":"203.0.113.7","authenticated":true}
+{"ts":"2026-09-19T12:34:56.789012+00:00","event":"write","endpoint":"PATCH /api/cases/{case_id}/status","case_id":"4FA22FE3","ip":"203.0.113.7","authenticated":true,"actor":"operator","actor_id":"9f86d081"}
 ```
 
 | Field | Meaning |
@@ -386,6 +386,8 @@ One JSON object per line on stdout, at INFO:
 | `case_id` | The case written. For `POST /api/triage`, the case it just opened |
 | `ip` | The client behind the proxy: leftmost `X-Forwarded-For`, else the socket peer |
 | `authenticated` | Whether the caller presented a valid API key |
+| `actor` | Who made the change: `operator` (a valid API key), `owner` (the case's session token) or `none`. With both a key and a token, the key is named |
+| `actor_id` | For `operator`, the first 8 hex characters of the SHA-256 of the key that was used, so rotated keys can be told apart. For `owner`, the first 12 characters of the case's `owner_hash`. `null` for `none` |
 
 Entries are written **after** the write succeeds, so the trail is of changes
 that happened, not requests that were made. A 401, a 429, a 404 and every read
@@ -394,13 +396,15 @@ record nothing at all.
 ### What is never logged
 
 No key material, and no free text: not `raw_alert`, not analyst notes, not
-note bodies, not resolution text. The entry records **that** a change happened.
+note bodies, not resolution text. The actor is named by a short hash prefix,
+never by the key or the session token, and `audit.build_entry` refuses an
+`actor_id` that is not lowercase hex of exactly that length. The entry records **that** a change happened.
 **What** it said belongs to the case timeline, which is already persisted and
 already served by `GET /api/cases/{id}`.
 
 That is structural rather than a matter of care. `audit.build_entry` has no
 parameter such a string could arrive through, and a test asserts the emitted
-keys are exactly the six above.
+keys are exactly the eight above.
 
 ### Why logs and not a database table
 
