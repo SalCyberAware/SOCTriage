@@ -284,6 +284,83 @@ class TestClientIp:
     def test_unknown_when_no_header_and_no_peer(self) -> None:
         assert client_ip(_StubRequest()) == "unknown"
 
+    def test_ignores_x_real_ip_outside_production(self) -> None:
+        request = _StubRequest(
+            {"x-real-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.7"},
+            peer="10.0.0.1",
+        )
+        assert client_ip(request) == "203.0.113.7"
+
+
+class TestClientIpProduction:
+    """In production the key is X-Real-IP, and X-Forwarded-For is never read."""
+
+    @pytest.fixture(autouse=True)
+    def _production(self, monkeypatch) -> None:
+        monkeypatch.setenv("SOCTRIAGE_ENV", "production")
+
+    def test_uses_x_real_ip(self) -> None:
+        request = _StubRequest(
+            {"x-real-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.7"},
+            peer="10.0.0.1",
+        )
+        assert client_ip(request) == "198.51.100.1"
+
+    def test_strips_whitespace(self) -> None:
+        request = _StubRequest({"x-real-ip": " 198.51.100.1 "}, peer="10.0.0.1")
+        assert client_ip(request) == "198.51.100.1"
+
+    def test_groups_ipv6_by_56(self) -> None:
+        a = _StubRequest({"x-real-ip": "2001:db8:abcd:12ff::1"}, peer="10.0.0.1")
+        b = _StubRequest({"x-real-ip": "2001:db8:abcd:1200:9::9"}, peer="10.0.0.1")
+        assert client_ip(a) == client_ip(b) == "2001:db8:abcd:1200::/56"
+
+    def test_separate_ipv6_56_networks_stay_separate(self) -> None:
+        a = _StubRequest({"x-real-ip": "2001:db8:abcd:1200::1"}, peer="10.0.0.1")
+        b = _StubRequest({"x-real-ip": "2001:db8:abcd:1300::1"}, peer="10.0.0.1")
+        assert client_ip(a) != client_ip(b)
+
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {},
+            {"x-real-ip": ""},
+            {"x-real-ip": "   "},
+            {"x-real-ip": "not-an-ip"},
+            {"x-real-ip": "198.51.100.1, 198.51.100.2"},
+            {"x-real-ip": "198.51.100.0/24"},
+        ],
+        ids=["missing", "empty", "blank", "non-ip", "list", "network"],
+    )
+    def test_invalid_x_real_ip_falls_back_to_peer_not_forwarded_for(
+        self, headers: dict
+    ) -> None:
+        request = _StubRequest(
+            {**headers, "x-forwarded-for": "203.0.113.7"}, peer="10.0.0.1"
+        )
+        assert client_ip(request) == "10.0.0.1"
+
+    def test_unknown_when_no_valid_header_and_no_peer(self) -> None:
+        request = _StubRequest({"x-forwarded-for": "203.0.113.7"})
+        assert client_ip(request) == "unknown"
+
+    @pytest.mark.parametrize("value", ["", "production", "prod", "Developmnet"])
+    def test_anything_but_development_is_production(
+        self, monkeypatch, value: str
+    ) -> None:
+        monkeypatch.setenv("SOCTRIAGE_ENV", value)
+        request = _StubRequest(
+            {"x-real-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.7"}
+        )
+        assert client_ip(request) == "198.51.100.1"
+
+    def test_unset_is_production(self, monkeypatch) -> None:
+        monkeypatch.delenv("SOCTRIAGE_ENV", raising=False)
+        request = _StubRequest(
+            {"x-real-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.7"}
+        )
+        assert client_ip(request) == "198.51.100.1"
+
 
 # -- build_limiter / env configuration ----------------------------------------
 
@@ -548,3 +625,133 @@ class TestReadsStayOpen:
         for _ in range(5):
             response = client.get(path, headers={"x-forwarded-for": "203.0.113.9"})
             assert response.status_code in (200, 404)  # never 429
+
+
+# -- Production key, end to end -----------------------------------------------
+
+
+_TRIAGE_BODY = {"raw_alert": "test alert", "ioc": "8.8.8.8", "ioc_type": "ip"}
+
+
+@pytest.fixture
+def paid_calls(monkeypatch, make_enrichment, make_report):
+    """Stub enrichment and the AI call to succeed, counting each one.
+
+    Every call here stands in for one ThreatScan scan or one Anthropic
+    completion, so the counts are what a request would have cost.
+    """
+    calls = {"enrich": 0, "generate": 0}
+
+    async def fake_enrich(ioc, ioc_type):
+        calls["enrich"] += 1
+        return make_enrichment()
+
+    async def fake_generate(enrichment, alert):
+        calls["generate"] += 1
+        return make_report()
+
+    monkeypatch.setattr(triage_route, "enrich_ioc", fake_enrich)
+    monkeypatch.setattr(triage_route, "generate_report", fake_generate)
+    return calls
+
+
+class TestProductionRateLimitKey:
+    """POST /api/triage in production: the bucket follows X-Real-IP only."""
+
+    @pytest.fixture(autouse=True)
+    def _production(self, monkeypatch) -> None:
+        monkeypatch.setenv("SOCTRIAGE_ENV", "production")
+
+    def _post(self, client, headers: dict):
+        return client.post("/api/triage", json=_TRIAGE_BODY, headers=headers)
+
+    def test_a_valid_x_real_ip_is_the_key(
+        self, client, monkeypatch, paid_calls
+    ) -> None:
+        limiter = _use_limiter(monkeypatch, ip_rate=5, daily_triage_cap=100)
+
+        response = self._post(
+            client,
+            {"x-real-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.7"},
+        )
+
+        assert response.status_code == 200
+        assert list(limiter._ip_hits) == ["198.51.100.1"]
+
+    def test_rotating_forwarded_for_shares_one_bucket_until_429(
+        self, client, monkeypatch, paid_calls
+    ) -> None:
+        _use_limiter(monkeypatch, ip_rate=3, daily_triage_cap=100)
+        statuses = [
+            self._post(
+                client,
+                {"x-real-ip": "198.51.100.1", "x-forwarded-for": f"203.0.113.{i}"},
+            ).status_code
+            for i in range(5)
+        ]
+
+        assert statuses == [200, 200, 200, 429, 429]
+        assert paid_calls == {"enrich": 3, "generate": 3}
+
+    def test_different_x_real_ip_values_get_separate_buckets(
+        self, client, monkeypatch, paid_calls
+    ) -> None:
+        _use_limiter(monkeypatch, ip_rate=1, daily_triage_cap=100)
+
+        first = self._post(client, {"x-real-ip": "198.51.100.1"})
+        blocked = self._post(client, {"x-real-ip": "198.51.100.1"})
+        other = self._post(client, {"x-real-ip": "198.51.100.2"})
+
+        assert (first.status_code, blocked.status_code, other.status_code) == (
+            200,
+            429,
+            200,
+        )
+        assert paid_calls == {"enrich": 2, "generate": 2}
+
+    @pytest.mark.parametrize(
+        "real_ip",
+        [None, "", "not-an-ip", "198.51.100.1, 198.51.100.2"],
+        ids=["missing", "empty", "non-ip", "list"],
+    )
+    def test_invalid_x_real_ip_falls_back_to_the_socket_peer(
+        self, client, monkeypatch, paid_calls, real_ip
+    ) -> None:
+        """Every fallback request lands in the peer's bucket, whatever its
+        X-Forwarded-For says, so rotating that header gains nothing."""
+        limiter = _use_limiter(monkeypatch, ip_rate=2, daily_triage_cap=100)
+        base = {} if real_ip is None else {"x-real-ip": real_ip}
+        statuses = [
+            self._post(
+                client, {**base, "x-forwarded-for": f"203.0.113.{i}"}
+            ).status_code
+            for i in range(3)
+        ]
+
+        assert statuses == [200, 200, 429]
+        # TestClient's socket peer is "testclient".
+        assert list(limiter._ip_hits) == ["testclient"]
+        assert paid_calls == {"enrich": 2, "generate": 2}
+
+
+class TestDevelopmentRateLimitKeyUnchanged:
+    """Outside production the key stays the leftmost X-Forwarded-For entry."""
+
+    def test_forwarded_for_is_the_key_and_x_real_ip_is_ignored(
+        self, client, monkeypatch, paid_calls
+    ) -> None:
+        limiter = _use_limiter(monkeypatch, ip_rate=1, daily_triage_cap=100)
+
+        first = client.post(
+            "/api/triage",
+            json=_TRIAGE_BODY,
+            headers={"x-real-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.1"},
+        )
+        other = client.post(
+            "/api/triage",
+            json=_TRIAGE_BODY,
+            headers={"x-real-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.2"},
+        )
+
+        assert (first.status_code, other.status_code) == (200, 200)
+        assert sorted(limiter._ip_hits) == ["203.0.113.1", "203.0.113.2"]
