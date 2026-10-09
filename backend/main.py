@@ -1,4 +1,5 @@
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import TypedDict
 
@@ -11,8 +12,17 @@ load_dotenv()
 # Imported after load_dotenv() on purpose: database.py resolves DATABASE_URL at
 # import time, so the .env file has to be loaded before it is imported.
 from database import init_db  # noqa: E402
+from lockcheck import dependencies_locked  # noqa: E402
 from routes.triage import router as triage_router  # noqa: E402
 from security_headers import SecurityHeadersMiddleware  # noqa: E402
+
+# The running interpreter's major.minor, which the lock's --python-version
+# should match. A deploy that drifts from it shows here first.
+PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+# Whether the installed packages match backend/requirements.txt exactly. Worked
+# out once at startup: what is installed does not change while the process runs.
+DEPENDENCIES_LOCKED = dependencies_locked()
 
 
 @asynccontextmanager
@@ -117,4 +127,8 @@ def health():
         # Build identity: "1.0.0" is a literal and cannot tell today's build
         # from April's. This can. See PromptShield docs/AUTOMATION_PLAN.md.
         "commit":  _build_commit(),
+        # Runtime identity: which Python, and whether the installed packages
+        # are exactly the lock's. A boolean only; versions are not listed.
+        "python":  PYTHON_VERSION,
+        "dependencies_locked": DEPENDENCIES_LOCKED,
     }
