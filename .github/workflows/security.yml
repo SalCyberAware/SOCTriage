@@ -56,17 +56,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pip-audit
 
-      # This audits the resolved tree, not just the eight pinned lines in the
-      # file, which matters here: the findings as of 2026-09-16 are in starlette,
-      # a transitive dependency pulled in by fastapi and never named in
-      # requirements.txt.
-      #
-      # This job is expected to be red. As of 2026-09-16 the tree carries 8
-      # advisories: 7 in starlette 0.38.6 and 1 in python-dotenv 1.0.1. Nothing
-      # is ignored or suppressed to hide that; clearing it needs a dependency
-      # bump, which is a Tier 2 change for a human to merge.
+      # backend/requirements.txt is the hashed lock, so it already names every
+      # package production installs, transitives included (starlette, the one
+      # that carried the September 2026 findings, among them). --disable-pip
+      # audits exactly those pins instead of resolving the tree again, and
+      # --require-hashes is what a hashed file needs to be read that way.
+      # Nothing is ignored or suppressed.
       - name: Audit backend/requirements.txt
-        run: pip-audit -r backend/requirements.txt --progress-spinner off
+        run: pip-audit -r backend/requirements.txt --require-hashes --disable-pip --progress-spinner off
 
   npm-audit:
     name: npm audit (frontend production tree)

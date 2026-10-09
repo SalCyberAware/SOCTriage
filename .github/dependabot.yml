@@ -38,10 +38,14 @@
 version: 2
 
 updates:
-  # ── Backend (pip, FastAPI service) ────────────────────────────────────────
-  # Covers requirements.txt and requirements-dev.txt in the same directory, so
-  # runtime and tooling bumps arrive together in one reviewable PR.
-  - package-ecosystem: "pip"
+  # ── Backend (uv, FastAPI service) ─────────────────────────────────────────
+  # requirements.in and requirements-dev.in hold the ranges; requirements.txt
+  # and requirements-dev.txt are hashed locks compiled from them with
+  # `uv pip compile --universal --generate-hashes`. The "uv" ecosystem, not
+  # "pip", because it reruns that same command with the flags read back from
+  # each lock's header, so a bump keeps the hashes and the universal markers.
+  # Runtime and tooling bumps still arrive together in one reviewable PR.
+  - package-ecosystem: "uv"
     directory: "/backend"
     schedule:
       interval: "weekly"

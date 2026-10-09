@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install --require-hashes -r requirements-dev.txt
 
       - name: Run pytest
         run: pytest --cov=. --cov-report=xml --cov-report=term-missing
@@ -41,6 +41,52 @@ jobs:
           files: ./backend/coverage.xml
           flags: backend
           fail_ci_if_error: false
+
+  # Installs ONLY the production lock, the way Railway does, on the Python
+  # backend/runtime.txt names. Proves the hashed lock installs on Linux, that the
+  # installed set is consistent (pip check), that the app sees exactly the lock's
+  # versions (the same check /health reports as dependencies_locked), and that
+  # the lock still matches requirements.in. Required by the main ruleset.
+  hashed-production-install:
+    name: Hashed production install
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Keep in sync with backend/runtime.txt and the lock's --python-version.
+          python-version: '3.11.9'
+
+      # A fresh venv with nothing in it, so nothing outside the lock can satisfy
+      # a requirement. pip is not upgraded first: Railway does not either.
+      - name: Install the production lock with hashes
+        run: |
+          python -m venv "$RUNNER_TEMP/prod"
+          "$RUNNER_TEMP/prod/bin/pip" install --require-hashes -r requirements.txt
+
+      - name: Check the installed set matches the lock
+        run: |
+          "$RUNNER_TEMP/prod/bin/pip" check
+          "$RUNNER_TEMP/prod/bin/python" -c "import main; print('python', main.PYTHON_VERSION, 'dependencies_locked', main.DEPENDENCIES_LOCKED); assert main.DEPENDENCIES_LOCKED, 'installed packages differ from requirements.txt'"
+
+      # uv keeps the pins already in an output file, so recompiling an unchanged
+      # requirements.in reproduces the lock byte for byte. A diff means someone
+      # edited requirements.in without regenerating, or edited the lock by hand.
+      # uv is pinned so its output format cannot change underneath the check.
+      - name: Check the locks still match their .in files
+        run: |
+          python -m pip install uv==0.12.18
+          uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes --quiet --custom-compile-command "uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt" -o requirements.txt
+          uv pip compile requirements-dev.in --universal --python-version 3.11 --generate-hashes --quiet --custom-compile-command "uv pip compile requirements-dev.in --universal --python-version 3.11 --generate-hashes -o requirements-dev.txt" -o requirements-dev.txt
+          git diff --exit-code -- requirements.txt requirements-dev.txt
 
   migrations-postgres:
     name: Migrations and tests on Postgres
@@ -91,7 +137,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install --require-hashes -r requirements-dev.txt
 
       - name: Migrate an empty database to head
         run: alembic upgrade head

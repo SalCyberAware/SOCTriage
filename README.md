@@ -461,7 +461,7 @@ python -m venv .venv
 # Windows:      .venv\Scripts\activate
 # macOS/Linux:  source .venv/bin/activate
 
-pip install -r requirements.txt        # to run the service
+pip install -r requirements.txt        # to run the service (hash-checked lock)
 pip install -r requirements-dev.txt    # to run the tests too (adds pytest, ruff, mypy)
 
 cp .env.example .env
@@ -472,7 +472,33 @@ uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
 `requirements.txt` holds runtime dependencies only. Installing it alone is
 enough to serve the API but not to run the test suite, which is why
-`requirements-dev.txt` exists and is what CI installs.
+`requirements-dev.txt` exists and is what the test jobs install.
+
+### Dependencies and the lock
+
+Production installs exact, hash-checked versions:
+
+| File | What it is |
+|------|------------|
+| `requirements.in` | The runtime dependency ranges. Edit this one. |
+| `requirements.txt` | The lock compiled from it: every package, transitives included, pinned with sha256 hashes. Railway and CI install this. |
+| `requirements-dev.in` | Dev tools (pytest, ruff, mypy), constrained to the lock. |
+| `requirements-dev.txt` | The dev lock compiled from it. |
+
+pip checks hashes automatically for a file that has them. The lock is
+universal, so the same file installs on Railway's Linux and on Windows or
+macOS. After editing a `.in` file, regenerate from `backend/` with
+[uv](https://docs.astral.sh/uv/) 0.12.18, the version CI pins:
+
+```bash
+uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt
+uv pip compile requirements-dev.in --universal --python-version 3.11 --generate-hashes -o requirements-dev.txt
+```
+
+CI's **Hashed production install** job fails if a lock no longer matches its
+`.in` file, and `/health` reports `dependencies_locked: true` only when the
+running process has exactly the lock's versions. Dependabot (the `uv`
+ecosystem) regenerates the locks itself on its update PRs.
 
 ### Environment Variables
 
@@ -590,8 +616,10 @@ SOCTriage/
 │   │   ├── test_limits.py
 │   │   ├── test_migrations.py
 │   │   └── test_triage_routes.py
-│   ├── requirements.txt           # Runtime dependencies
-│   ├── requirements-dev.txt       # Runtime + pytest, pytest-cov, ruff, mypy
+│   ├── requirements.in            # Runtime dependency ranges (edit this)
+│   ├── requirements.txt           # Hashed lock compiled from requirements.in
+│   ├── requirements-dev.in        # pytest, pytest-cov, ruff, mypy ranges
+│   ├── requirements-dev.txt       # Hashed dev lock
 │   ├── pytest.ini
 │   ├── ruff.toml
 │   ├── mypy.ini

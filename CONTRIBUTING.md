@@ -29,8 +29,20 @@ npm install
 ```
 
 `requirements.txt` holds runtime dependencies only. Install
-`requirements-dev.txt` for development: it pulls in `requirements.txt` and adds
-the test and lint tooling, and it is what every CI job installs.
+`requirements-dev.txt` for development: it holds the same pinned versions plus
+the test and lint tooling, and it is what every test job installs.
+
+Both are hashed locks compiled by uv. To add or change a dependency, edit
+`requirements.in` (or `requirements-dev.in` for tooling), then regenerate both
+locks from `backend/` with uv 0.12.18:
+
+```bash
+uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt
+uv pip compile requirements-dev.in --universal --python-version 3.11 --generate-hashes -o requirements-dev.txt
+```
+
+Never edit a lock by hand: the **Hashed production install** CI job fails when
+a lock no longer matches its `.in` file.
 
 ## Environment Variables
 

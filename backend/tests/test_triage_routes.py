@@ -15,6 +15,8 @@ The ``client`` fixture (backend/conftest.py) presents a valid API key on every
 request, so the PATCH routes here exercise their behaviour rather than the
 gate in front of it. tests/test_auth.py covers the gate itself.
 """
+import sys
+
 from models import CaseStatus, IOCType, Severity
 from routes import triage as triage_route
 
@@ -74,7 +76,16 @@ def test_health_keeps_existing_fields_alongside_commit(client):
     """The uptime monitor reads status/service/version — adding commit is additive."""
     body = client.get("/health").json()
 
-    assert set(body) == {"status", "service", "version", "commit"}
+    assert set(body) == {
+        "status", "service", "version", "commit", "python", "dependencies_locked",
+    }
+
+
+def test_health_reports_python_major_minor_and_lock_state(client):
+    body = client.get("/health").json()
+
+    assert body["python"] == f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert isinstance(body["dependencies_locked"], bool)
 
 
 # ── GET /api/cases ───────────────────────────────────────────────────────────
