@@ -1,14 +1,14 @@
 # Production dependency RANGES, the source of the lock. Edit this file, then
 # regenerate backend/requirements.txt (the hashed lock Railway and CI install):
 #   uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt
-fastapi==0.142.2
+fastapi==0.142.4
 uvicorn==0.54.0
 # Used directly by services/enrichment.py for the ThreatScan calls, and by
 # starlette's TestClient (which caps it below 0.29). NOT the Anthropic SDK's
 # HTTP layer: anthropic 1.x runs on httpx2, which arrives transitively.
 httpx==0.28.1
 python-dotenv==1.2.4
-anthropic==1.11.0
+anthropic==1.12.0
 pydantic==2.13.5
 # Held on the 2.0 line. SQLAlchemy 2.1 changed the default driver for a bare
 # postgresql:// URL from psycopg2 to psycopg (v3), which is not installed, and
