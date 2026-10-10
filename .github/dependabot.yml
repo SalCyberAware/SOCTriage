@@ -75,6 +75,33 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
 
+  # ── Backend Docker base image (backend/Dockerfile) ────────────────────────
+  # The base image is pinned by digest, which goes stale silently as Debian
+  # and Python ship security fixes. This proposes the new digest for the same
+  # tag. The Python minor is held: 3.11 matches the lock's --python-version, so
+  # moving off it is a planned change made together with a recompiled lock,
+  # not a bot bump.
+  #
+  # The image comes from public.ecr.aws/docker/library, Amazon's public mirror
+  # of Docker Hub's official images. Dependabot reads that registry from the
+  # FROM line and lists its tags anonymously; no registry credentials are
+  # needed. It names the dependency by its path there (docker/library/python),
+  # so the ignore rule matches any name ending in "python".
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "backend"]
+    commit-message:
+      prefix: "build(deps)"
+    ignore:
+      - dependency-name: "*python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
   # ── Frontend (npm, React + Vite) ──────────────────────────────────────────
   - package-ecosystem: "npm"
     directory: "/frontend"

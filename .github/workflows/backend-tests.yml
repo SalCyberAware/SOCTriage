@@ -157,3 +157,194 @@ jobs:
 
       - name: Run pytest against the migrated database
         run: pytest
+
+  # Builds backend/Dockerfile, the image Railway runs, and starts it against a
+  # throwaway Postgres the way production starts: the app migrates on startup,
+  # so /health answering means the migrations finished.
+  container:
+    name: Backend container (build + smoke test)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Keep the major version in step with the Railway Postgres service.
+        image: postgres:16
+        env:
+          POSTGRES_USER: soctriage
+          POSTGRES_DB: soctriage_ci
+          # No password at all rather than a placeholder one: the service is
+          # reachable only from this job and gone when it ends.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U soctriage -d soctriage_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      # Decoys prove .dockerignore keeps env files out of the image, including
+      # one inside a folder the allowlist lets in.
+      - name: Plant decoy .env files
+        run: |
+          echo "DECOY=1" > .env
+          echo "DECOY=1" > services/.env
+
+      - name: Build the image
+        run: docker build --pull -t soctriage-backend:ci .
+
+      - name: Image runs as non-root and holds no env file, tests or dev tooling
+        run: |
+          uid=$(docker run --rm --entrypoint id soctriage-backend:ci -u)
+          test "$uid" != "0" || { echo "image runs as root"; exit 1; }
+          docker run --rm --entrypoint sh soctriage-backend:ci -c '
+            found=$(find / -xdev \( -name ".env" -o -path "/app/tests" -o -name "conftest.py" \
+                      -o -name "requirements-dev.*" -o -name "Procfile" -o -name "*.db" \) \
+                      -not -path "/proc/*" 2>/dev/null)
+            test -z "$found" || { echo "unexpected files:"; echo "$found"; exit 1; }'
+
+      # Host networking so the container reaches the Postgres service on
+      # localhost. PORT=9090 rather than the default 8080, to prove the
+      # container listens on whatever port the platform hands it. The commit
+      # goes in RAILWAY_GIT_COMMIT_SHA, the variable /health reads first in
+      # production. FRONTEND_URL is a placeholder origin, and no key is set.
+      - name: Start the container and check /health
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          docker run -d --name api --network host \
+            -e PORT=9090 -e FRONTEND_URL=https://example.com \
+            -e DATABASE_URL=postgresql://soctriage@127.0.0.1:5432/soctriage_ci \
+            -e RAILWAY_GIT_COMMIT_SHA="$EXPECTED_SHA" soctriage-backend:ci
+          for i in $(seq 1 30); do
+            curl -fsS -o health.json http://127.0.0.1:9090/health && break
+            sleep 2
+          done
+          test -s health.json || { echo "no healthy answer in 60s"; exit 1; }
+          python3 - <<'EOF'
+          import json, os
+          h = json.load(open("health.json"))
+          assert h["status"] == "ok", h["status"]
+          assert h["commit"] == os.environ["EXPECTED_SHA"], h["commit"]
+          assert h["python"] == "3.11", h["python"]
+          assert h["dependencies_locked"] is True, "installed packages differ from backend/requirements.txt"
+          print("health ok:", {k: h[k] for k in ("commit", "python", "dependencies_locked")})
+          EOF
+
+      # Startup ran init_db, the same path production takes. The database must
+      # now be at the newest migration, with the columns the models expect.
+      - name: Migrations ran on startup
+        run: |
+          docker exec -i api python - <<'EOF'
+          from alembic.config import Config
+          from alembic.runtime.migration import MigrationContext
+          from alembic.script import ScriptDirectory
+          from sqlalchemy import inspect
+
+          from database import engine
+
+          head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+          with engine.connect() as connection:
+              current = MigrationContext.configure(connection).get_current_revision()
+              columns = {c["name"] for c in inspect(connection).get_columns("cases")}
+          assert current == head, (current, head)
+          assert "owner_hash" in columns, columns
+          print("migrations ok: database at", current)
+          EOF
+
+      # A triage builds the Anthropic request and parses its tool call, calls
+      # ThreatScan, applies the severity floor, builds MITRE links, writes a
+      # case and an audit line. None of that runs at startup, so a module or
+      # file missing from the image would pass /health and fail the first real
+      # triage. This runs one end to end inside the container with both outbound
+      # clients answered in-process: no model call, no ThreatScan call. The
+      # system prompt and the ATT&CK ID check are in the code; no prompt or
+      # MITRE data files are read.
+      - name: Run a triage inside the container with no outbound calls
+        run: |
+          docker exec -i api python - <<'EOF'
+          import json
+          import types
+
+          import httpx
+          import httpx2
+          from anthropic import AsyncAnthropic
+          from fastapi.testclient import TestClient
+
+          import main
+          from services import ai_engine, enrichment
+
+          # The container was started with no key, so the real client has none.
+          assert ai_engine.client.api_key is None, "an Anthropic key reached the container"
+
+          hosts = []
+
+
+          def model(request):
+              hosts.append(request.url.host)
+              assert request.url.path == "/v1/messages", request.url
+              body = json.loads(request.content)
+              tool = body["tool_choice"]["name"]
+              return httpx2.Response(200, json={
+                  "id": "msg_smoke", "type": "message", "role": "assistant",
+                  "model": body["model"], "stop_reason": "tool_use", "stop_sequence": None,
+                  "usage": {"input_tokens": 1, "output_tokens": 1},
+                  "content": [{"type": "tool_use", "id": "toolu_smoke", "name": tool, "input": {
+                      "title": "Container smoke test", "severity": "low", "summary": "Offline check.",
+                      "affected_assets": ["WS-1"], "threat_type": "Command and control",
+                      "mitre_techniques": [{"technique_id": "T1071", "technique_name": "Application Layer Protocol",
+                                            "tactic": "Command and Control", "description": "Offline check."}],
+                      "recommended_actions": ["Block the address"], "playbook": ["Isolate the host"],
+                  }}],
+              })
+
+
+          def threatscan(request):
+              hosts.append(request.url.host)
+              assert request.url.path.endswith("/scan"), request.url
+              return httpx.Response(200, json={"verdict": "malicious", "score": 80, "engines": []})
+
+
+          # Both outbound clients answer from in-process handlers: no request leaves the
+          # container, and the key is a placeholder that never reaches Anthropic. The
+          # SDK runs on httpx2, enrichment on httpx, so each gets its own transport.
+          ai_engine.client = AsyncAnthropic(
+              api_key="placeholder", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(model)))
+
+
+          class OfflineAsyncClient(httpx.AsyncClient):
+              def __init__(self, *args, **kwargs):
+                  super().__init__(*args, transport=httpx.MockTransport(threatscan), **kwargs)
+
+
+          enrichment.httpx = types.SimpleNamespace(AsyncClient=OfflineAsyncClient)
+
+          token = {"X-Session-Token": "container-smoke-test-token"}
+          with TestClient(main.app) as api:
+              r = api.post("/api/triage", headers=token, json={"ioc": "198.51.100.7", "ioc_type": "ip",
+                                                              "raw_alert": "Outbound beacon from WS-1"})
+              assert r.status_code == 200, (r.status_code, r.text)
+              out = r.json()
+              report = out["report"]
+              assert out["enrichment"]["verdict"] == "malicious", out["enrichment"]
+              assert report["severity"] == "high", "severity floor did not apply"
+              assert report["mitre_techniques"][0]["mitre_url"] == "https://attack.mitre.org/techniques/T1071/"
+              case = api.get(f"/api/cases/{out['case_id']}", headers=token)
+              assert case.status_code == 200, (case.status_code, case.text)
+              assert case.json()["report"]["title"] == "Container smoke test"
+
+          assert sorted(set(hosts)) == ["api.anthropic.com", "threatscan-production.up.railway.app"], hosts
+          print("triage path ok: case", out["case_id"], "stored and read back,", len(hosts), "offline calls")
+          EOF
+
+      - name: Container logs
+        if: always()
+        run: docker logs api || true

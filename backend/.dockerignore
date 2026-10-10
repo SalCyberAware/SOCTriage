@@ -1,0 +1,23 @@
+# An allowlist: the build context is backend/, which also holds tests, dev
+# tooling config, a local .env, a virtualenv and a local SQLite file, so
+# everything is excluded and only what the API image needs is let back in.
+*
+!main.py
+!database.py
+!models.py
+!auth.py
+!audit.py
+!limits.py
+!lockcheck.py
+!security_headers.py
+!routes/
+!services/
+!alembic.ini
+!alembic/
+!requirements.txt
+
+# Never in the image, even inside an allowed folder.
+**/.env
+**/.env.*
+**/__pycache__/
+**/*.pyc

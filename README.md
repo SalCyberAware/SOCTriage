@@ -474,6 +474,34 @@ uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 enough to serve the API but not to run the test suite, which is why
 `requirements-dev.txt` exists and is what the test jobs install.
 
+### Backend in Docker
+
+Railway builds [`backend/Dockerfile`](backend/Dockerfile), and the same image
+runs anywhere Docker does:
+
+```bash
+docker build -t soctriage-backend backend
+docker run -p 8080:8080 --env-file backend/.env soctriage-backend
+```
+
+- The base is the official Python 3.11 slim image, pinned by digest and pulled
+  from `public.ecr.aws/docker/library` (Amazon's mirror of Docker Hub's official
+  images), because Docker Hub refuses anonymous pulls from shared builders.
+- Dependencies install from the hashed lock with `--require-hashes` into a
+  virtualenv. The app runs as an unprivileged user and cannot rewrite its own
+  code. It listens on `PORT` (8080 if unset).
+- Startup migrates the database to the newest Alembic revision, exactly as it
+  does outside Docker, so the migration files ship in the image.
+- Set `DATABASE_URL`. Without it the app falls back to a SQLite file in its own
+  directory, which the unprivileged user cannot create. For a quick local try,
+  point it at a writable volume instead, for example
+  `-v soctriage-data:/data -e DATABASE_URL=sqlite:////data/soctriage.db`.
+- Keys are read from the environment at runtime. None is baked into the image,
+  and `backend/.dockerignore` is an allowlist that keeps `.env` files, tests
+  and dev tooling out.
+- Leave Railway's **Custom Start Command** empty: the image already runs
+  uvicorn, and a custom command would replace it.
+
 ### Dependencies and the lock
 
 Production installs exact, hash-checked versions:
@@ -624,7 +652,9 @@ SOCTriage/
 │   ├── ruff.toml
 │   ├── mypy.ini
 │   ├── .env.example               # Annotated list of every variable
-│   ├── Procfile                   # Railway start command
+│   ├── Dockerfile                 # The image Railway builds and runs
+│   ├── .dockerignore              # Allowlist of what goes into the image
+│   ├── Procfile                   # Start command for the previous Railpack build
 │   └── runtime.txt                # Python 3.11.9
 └── frontend/
     ├── src/
