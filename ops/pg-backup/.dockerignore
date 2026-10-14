@@ -1,0 +1,4 @@
+# An allowlist: the image needs backup.sh and nothing else from this folder.
+# Everything else, including any .env a developer leaves here, stays out.
+*
+!backup.sh

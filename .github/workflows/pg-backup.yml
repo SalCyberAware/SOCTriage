@@ -1,0 +1,320 @@
+name: Database backup job
+
+# Tests ops/pg-backup, the nightly pg_dump job that backs the production
+# Postgres up to a Railway storage bucket. Nothing here reaches Railway: the
+# database and the bucket are throwaway containers that exist only for the
+# length of the job, and every credential is a placeholder.
+#
+# Kept apart from backend-tests.yml because the job is a separate image with
+# its own base, and a red run here should name the backup job, not the API.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck (backup.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # shellcheck ships on the runner image. --shell=sh holds the script to
+      # POSIX sh, which is what Alpine's busybox runs it with.
+      - name: Run shellcheck
+        run: |
+          shellcheck --version
+          shellcheck --shell=sh --severity=style ops/pg-backup/backup.sh
+
+  end-to-end:
+    name: Backup image (build, dump, upload, prune, restore)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Postgres 18, the production major. Pinned by digest; from the same
+        # public mirror the image itself is built from.
+        image: public.ecr.aws/docker/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_USER: soctriage
+          POSTGRES_DB: soctriage_ci
+          # No password at all rather than a placeholder one: the service is
+          # reachable only from this job and gone when it ends.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U soctriage -d soctriage_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      s3:
+        # Adobe S3Mock 5.2.3, an S3-compatible stand-in for the bucket. MinIO
+        # no longer publishes a container image. S3Mock accepts any
+        # credentials and supports path-style URLs only.
+        image: adobe/s3mock@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92
+        env:
+          COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: soctriage-backups
+        ports:
+          - 9090:9090
+
+    env:
+      IMAGE: soctriage-pg-backup:ci
+      # For the test's own setup and checks.
+      PG_URL: postgresql://soctriage@127.0.0.1:5432
+      S3_URL: http://127.0.0.1:9090
+      BUCKET_NAME: soctriage-backups
+      # Placeholders handed to the backup container. The server ignores the
+      # password (trust auth); it is there so the log checks can prove neither
+      # it nor the secret key is ever printed.
+      DB_PASSWORD_MARKER: ci-db-password-must-not-be-logged
+      SECRET_MARKER: ci-secret-key-must-not-be-logged
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A decoy proves .dockerignore keeps env files out of the image.
+      - name: Plant a decoy .env file
+        run: echo "DECOY=1" > ops/pg-backup/.env
+
+      - name: Build the image
+        run: docker build --pull -t "$IMAGE" ops/pg-backup
+
+      - name: Image runs as non-root, holds no env file, and has pg_dump 18 or newer
+        run: |
+          uid=$(docker run --rm --entrypoint id "$IMAGE" -u)
+          test "$uid" != "0" || { echo "image runs as root"; exit 1; }
+          docker run --rm --entrypoint sh "$IMAGE" -c '
+            found=$(find / -xdev -name ".env" -not -path "/proc/*" 2>/dev/null)
+            test -z "$found" || { echo "unexpected files:"; echo "$found"; exit 1; }'
+          version=$(docker run --rm --entrypoint pg_dump "$IMAGE" --version)
+          echo "$version"
+          major=$(echo "$version" | sed -E 's/.* ([0-9]+)\..*/\1/')
+          test "$major" -ge 18 || { echo "pg_dump $major cannot dump a Postgres 18 server"; exit 1; }
+          docker run --rm --entrypoint aws "$IMAGE" --version
+
+      # Helpers the steps below share. run-backup.sh starts the backup
+      # container with the standard placeholder settings; extra docker
+      # arguments (for example -e NAME=value) override them. s3.sh runs the
+      # image's AWS CLI against the stand-in bucket. check-log.sh fails if a
+      # log shows a credential, a URL or the database address.
+      - name: Write test helpers
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/s3data"
+          printf '[default]\ns3 =\n    addressing_style = path\n' > "$RUNNER_TEMP/aws-config"
+
+          cat > "$RUNNER_TEMP/bin/run-backup.sh" <<'EOF'
+          #!/bin/sh
+          # Usage: run-backup.sh LOGFILE [docker run arguments...]
+          log=$1; shift
+          docker run --rm --network host \
+            -e DATABASE_URL="postgresql://soctriage:$DB_PASSWORD_MARKER@127.0.0.1:5432/soctriage_ci" \
+            -e AWS_ACCESS_KEY_ID=ci-access-key-id \
+            -e AWS_SECRET_ACCESS_KEY="$SECRET_MARKER" \
+            -e AWS_DEFAULT_REGION=us-east-1 \
+            -e ENDPOINT="$S3_URL" \
+            -e BUCKET="$BUCKET_NAME" \
+            -e S3_ADDRESSING_STYLE=path \
+            "$@" "$IMAGE" > "$log" 2>&1
+          status=$?
+          cat "$log"
+          exit $status
+          EOF
+
+          cat > "$RUNNER_TEMP/bin/s3.sh" <<'EOF'
+          #!/bin/sh
+          exec docker run --rm --network host --user "$(id -u)" \
+            -v "$RUNNER_TEMP/aws-config:/tmp/aws-config:ro" -e AWS_CONFIG_FILE=/tmp/aws-config \
+            -v "$RUNNER_TEMP/s3data:/data" \
+            -e AWS_ACCESS_KEY_ID=ci-access-key-id -e AWS_SECRET_ACCESS_KEY=ci-placeholder \
+            -e AWS_DEFAULT_REGION=us-east-1 \
+            --entrypoint aws "$IMAGE" --endpoint-url "$S3_URL" "$@"
+          EOF
+
+          cat > "$RUNNER_TEMP/bin/check-log.sh" <<'EOF'
+          #!/bin/sh
+          for leak in "$DB_PASSWORD_MARKER" "$SECRET_MARKER" ci-access-key-id 127.0.0.1 "://" ; do
+            if grep -qF -- "$leak" "$1"; then
+              echo "log shows something it must not: $leak"; exit 1
+            fi
+          done
+          echo "log is clean"
+          EOF
+
+          cat > "$RUNNER_TEMP/bin/psql.sh" <<'EOF'
+          #!/bin/sh
+          # Usage: psql.sh DATABASE [psql arguments...]
+          db=$1; shift
+          exec docker run --rm -i --network host --entrypoint psql "$IMAGE" \
+            "$PG_URL/$db" -v ON_ERROR_STOP=1 -X -q "$@"
+          EOF
+
+          chmod +x "$RUNNER_TEMP"/bin/*.sh
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Wait for the stand-in bucket
+        run: |
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null "$S3_URL/" && exit 0
+            sleep 2
+          done
+          echo "S3Mock did not answer in 60s"; exit 1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Keep in sync with backend/runtime.txt.
+          python-version: '3.11.9'
+
+      # The real schema, built the way production builds it: Alembic from an
+      # empty database to head. Only the production lock is needed for that.
+      - name: Create the SOCTriage schema with Alembic
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://soctriage@127.0.0.1:5432/soctriage_ci
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --require-hashes -r requirements.txt
+          "$RUNNER_TEMP/venv/bin/alembic" upgrade head
+
+      # Fake cases only, with documentation addresses.
+      - name: Add fake cases
+        run: |
+          psql.sh soctriage_ci <<'SQL'
+          INSERT INTO cases (case_id, ioc, ioc_type, status, severity, created_at, updated_at,
+                             analyst_notes, enrichment, report, timeline, owner_hash) VALUES
+            ('CI00000001', '198.51.100.7', 'ip', 'open', 'high', now(), now(),
+             'Fake case for the backup test', NULL, NULL, '[]', NULL),
+            ('CI00000002', '203.0.113.9', 'ip', 'closed', 'low', now() - interval '2 days', now(),
+             NULL, '{"verdict": "clean", "score": 0}', NULL, '[{"action": "closed"}]', NULL),
+            ('CI00000003', 'example.com', 'domain', 'in_progress', 'medium', now(), now(),
+             NULL, NULL, '{"title": "Fake report"}', '[]', repeat('a', 64));
+          SQL
+          psql.sh soctriage_ci -c "SELECT count(*) AS cases FROM cases"
+
+      - name: A missing variable fails, names the variable, shows no secret
+        run: |
+          if run-backup.sh missing.log -e AWS_SECRET_ACCESS_KEY= -e ENDPOINT=; then
+            echo "expected a failure"; exit 1
+          fi
+          grep -q "missing required variable(s): AWS_SECRET_ACCESS_KEY ENDPOINT" missing.log
+          check-log.sh missing.log
+
+      - name: Bad optional settings fail with a clear message
+        run: |
+          if run-backup.sh days.log -e RETENTION_DAYS=0; then echo "RETENTION_DAYS=0 accepted"; exit 1; fi
+          grep -q "RETENTION_DAYS must be a positive whole number" days.log
+          if run-backup.sh days2.log -e RETENTION_DAYS=abc; then echo "RETENTION_DAYS=abc accepted"; exit 1; fi
+          grep -q "RETENTION_DAYS must be a positive whole number" days2.log
+          if run-backup.sh prefix.log -e BACKUP_PREFIX=/; then echo "BACKUP_PREFIX=/ accepted"; exit 1; fi
+          grep -q "BACKUP_PREFIX must be" prefix.log
+          if run-backup.sh prefix2.log -e BACKUP_PREFIX=soctriage; then echo "prefix without / accepted"; exit 1; fi
+          grep -q "BACKUP_PREFIX must end with /" prefix2.log
+          for f in days.log days2.log prefix.log prefix2.log; do check-log.sh "$f"; done
+
+      # pg_dump's own error names the host and port. The log must not.
+      - name: An unreachable database fails without showing its address
+        run: |
+          if run-backup.sh unreachable.log \
+               -e DATABASE_URL="postgresql://soctriage:$DB_PASSWORD_MARKER@127.0.0.1:1/soctriage_ci"; then
+            echo "expected a failure"; exit 1
+          fi
+          grep -q "pg_dump failed 3 times" unreachable.log
+          check-log.sh unreachable.log
+
+      - name: A database without the SOCTriage tables fails the archive check
+        run: |
+          psql.sh soctriage_ci -c "CREATE DATABASE not_soctriage"
+          if run-backup.sh wrongdb.log \
+               -e DATABASE_URL="postgresql://soctriage:$DB_PASSWORD_MARKER@127.0.0.1:5432/not_soctriage"; then
+            echo "expected a failure"; exit 1
+          fi
+          grep -q "dump has no cases table" wrongdb.log
+          check-log.sh wrongdb.log
+
+      # Retention fixtures: an expired backup inside the prefix (must go), an
+      # expired backup-named file outside the prefix and a file in the prefix
+      # that is not a backup (both must stay), and a day-old backup (must stay).
+      - name: Plant objects for the retention check
+        run: |
+          echo "fixture" > "$RUNNER_TEMP/s3data/fixture"
+          recent="soctriage-$(date -u -d '1 day ago' +%Y%m%dT%H%M%SZ).dump"
+          echo "RECENT_KEY=soctriage/$recent" >> "$GITHUB_ENV"
+          for key in soctriage/soctriage-20200101T000000Z.dump \
+                     elsewhere/soctriage-20200101T000000Z.dump \
+                     soctriage/notes.txt \
+                     "soctriage/$recent"; do
+            s3.sh s3 cp /data/fixture "s3://$BUCKET_NAME/$key" --only-show-errors
+          done
+
+      - name: Run a backup
+        run: |
+          run-backup.sh first.log
+          for line in "start: backup" "dump size: " "archive valid, lists cases and alembic_version" \
+                      "upload done: soctriage/soctriage-" "size matches" \
+                      "pruned soctriage/soctriage-20200101T000000Z.dump" \
+                      "objects pruned: 1 older than 30 days, 2 backups kept" "finished: "; do
+            grep -qF -- "$line" first.log || { echo "missing log line: $line"; exit 1; }
+          done
+          check-log.sh first.log
+          echo "FIRST_KEY=$(sed -n 's/.*finished: //p' first.log)" >> "$GITHUB_ENV"
+
+      - name: Retention removed only the expired backup inside the prefix
+        run: |
+          s3.sh s3api list-objects-v2 --bucket "$BUCKET_NAME" --query 'Contents[].[Key]' --output text | sort > keys.txt
+          cat keys.txt
+          ! grep -qx "soctriage/soctriage-20200101T000000Z.dump" keys.txt || { echo "expired backup kept"; exit 1; }
+          for key in elsewhere/soctriage-20200101T000000Z.dump soctriage/notes.txt "$RECENT_KEY" "$FIRST_KEY"; do
+            grep -qxF "$key" keys.txt || { echo "missing: $key"; exit 1; }
+          done
+
+      # A second night: nothing is old enough to prune, and both new backups
+      # stay. With RETENTION_DAYS=1 the day-old planted backup goes as well,
+      # while the newest is kept.
+      - name: Run a second backup with a one-day retention
+        run: |
+          sleep 1
+          run-backup.sh second.log -e RETENTION_DAYS=1
+          grep -qF "pruned $RECENT_KEY" second.log
+          grep -qF "objects pruned: 1 older than 1 days, 2 backups kept" second.log
+          check-log.sh second.log
+          echo "SECOND_KEY=$(sed -n 's/.*finished: //p' second.log)" >> "$GITHUB_ENV"
+
+      - name: Restore the newest backup into a fresh database and compare
+        run: |
+          s3.sh s3api list-objects-v2 --bucket "$BUCKET_NAME" --prefix soctriage/soctriage- \
+            --query 'Contents[].[Key]' --output text | sort > backups.txt
+          cat backups.txt
+          test "$(wc -l < backups.txt)" -eq 2 || { echo "expected two backups"; exit 1; }
+          grep -qxF "$FIRST_KEY" backups.txt
+          newest=$(tail -n 1 backups.txt)
+          test "$newest" = "$SECOND_KEY" || { echo "newest is $newest, expected $SECOND_KEY"; exit 1; }
+
+          s3.sh s3 cp "s3://$BUCKET_NAME/$newest" /data/restore.dump --only-show-errors
+          psql.sh soctriage_ci -c "CREATE DATABASE soctriage_restore"
+          docker run --rm --network host -v "$RUNNER_TEMP/s3data:/data:ro" --entrypoint pg_restore "$IMAGE" \
+            --no-owner --clean --if-exists --exit-on-error \
+            --dbname="$PG_URL/soctriage_restore" /data/restore.dump
+
+          query="SELECT (SELECT count(*) FROM cases) || ' cases, '
+                     || (SELECT count(*) FROM cases WHERE owner_hash IS NOT NULL) || ' owned, '
+                     || (SELECT string_agg(case_id || ':' || status || ':' || md5(coalesce(report::text, '')), ',' ORDER BY case_id) FROM cases)
+                     || ', alembic ' || (SELECT version_num FROM alembic_version)"
+          source=$(psql.sh soctriage_ci -At -c "$query")
+          restored=$(psql.sh soctriage_restore -At -c "$query")
+          echo "source:   $source"
+          echo "restored: $restored"
+          test "$source" = "$restored" || { echo "restored data differs"; exit 1; }
+          case "$restored" in "3 cases, 1 owned,"*) ;; *) echo "unexpected row counts"; exit 1 ;; esac
