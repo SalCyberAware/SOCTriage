@@ -123,6 +123,72 @@ rm "./$FILE"
 
 Then close the shell so the bucket credentials go with it.
 
+## Restore test on Railway
+
+Steps 1 to 7 need a laptop with Docker and the Postgres tools. The restore
+test does the same job inside the Railway project, with no tools and no
+credentials on your machine: a temporary service built from
+`Dockerfile.restore-drill` runs `restore-drill.sh` once, restores the newest
+backup (or the one named in `RESTORE_FILE`) into a temporary, empty Postgres
+and prints a summary. Nothing in production is read or changed apart from
+downloading the backup file from the bucket.
+
+The bucket credentials it uses can also write and delete backups. The script
+only lists and downloads, but the service holding them is removed as soon as
+the test is done (step 6).
+
+1. **Add a temporary Postgres.** In the project, choose Create, then Database,
+   then PostgreSQL. Rename the new service to `restore-scratch`. A new
+   Railway Postgres is empty, which is what the test needs.
+2. **Add a temporary service from this repository.** Choose Create, then
+   GitHub Repo, and pick SOCTriage. In its Settings:
+   - Source, Root Directory: `/ops/pg-backup`
+   - Deploy, Restart Policy: Never, so a failed test is not run again and
+     again.
+   - Leave Cron Schedule empty and do not add a public domain.
+   - Name it something obvious, for example `restore-drill`.
+3. **Set its variables, as references only.** In the Variables tab:
+   - `RAILWAY_DOCKERFILE_PATH` = `Dockerfile.restore-drill`. This is a plain
+     value, not a secret. It makes the service build
+     `Dockerfile.restore-drill` instead of the backup job's `Dockerfile`.
+   - The five bucket variables `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+     `AWS_DEFAULT_REGION`, `ENDPOINT` and `BUCKET`, plus
+     `S3_ADDRESSING_STYLE` if pg-backup has it: copy the same reference
+     expressions that pg-backup's Variables tab shows (open its Raw Editor to
+     see them). Never paste a key value.
+   - `RESTORE_DATABASE_URL` = `${{restore-scratch.DATABASE_URL}}`
+   - Never add `DATABASE_URL`. If it is present at all, even empty, the
+     script stops before doing anything.
+4. **Deploy** and wait for the deployment to finish. The container exits on
+   its own, so the deployment ends as completed or failed rather than staying
+   active.
+5. **Read the log** in the deployment's Deploy Logs. A good run ends with:
+
+   ```
+   restore-drill: summary
+   restore-drill:   file:             soctriage-YYYYMMDDTHHMMSSZ.dump
+   restore-drill:   file size:        ... bytes
+   restore-drill:   download:         ... s
+   restore-drill:   restore:          ... s (measured restore time)
+   restore-drill:   tables restored:  ...
+   restore-drill:   cases rows:       ...
+   restore-drill:   newest case:      ..., not later than the backup time ...
+   restore-drill:   alembic version:  ...
+   restore-drill: PASSED: soctriage-YYYYMMDDTHHMMSSZ.dump restored and checked
+   ```
+
+   Compare `cases rows` and `alembic version` the same way as in "6. Check
+   the row counts" above. Any line
+   starting with `FAILED:` means the test did not pass; it says why. Check
+   the build log too: it must have built `Dockerfile.restore-drill`. If it
+   built `Dockerfile` instead, the deploy log shows the backup job failing on
+   a missing `DATABASE_URL`, nothing ran, and the Dockerfile variable needs
+   fixing.
+6. **Delete both temporary services**, `restore-drill` and
+   `restore-scratch` (its volume goes with it), from each service's
+   Settings, Danger section. Then check that only the usual services and the
+   bucket are left in the project.
+
 ## Restoring into production
 
 This is an incident action, not a routine one. Do it only after the same file

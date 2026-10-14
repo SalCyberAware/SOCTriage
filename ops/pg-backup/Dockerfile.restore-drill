@@ -1,0 +1,31 @@
+# One-off restore test for the SOCTriage backups. A temporary Railway service
+# builds this file (root directory ops/pg-backup/, RAILWAY_DOCKERFILE_PATH set
+# to Dockerfile.restore-drill), restores a backup from the storage bucket into
+# an empty scratch Postgres, prints counts and exits. See restore-drill.sh for
+# the variables it needs and RESTORE.md for the steps.
+#
+#   docker build -f ops/pg-backup/Dockerfile.restore-drill -t soctriage-restore-drill ops/pg-backup
+#
+# Base, AWS CLI and user are the same as the backup image (Dockerfile), so a
+# backup made by one is restored with the same Postgres 18 tools. Keep the
+# digest in step with Dockerfile; Dependabot's /ops/pg-backup entry proposes
+# new digests for both files.
+FROM public.ecr.aws/docker/library/postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+
+# AWS CLI v2 from Alpine's own packages, as Railway's backup guide does.
+RUN apk add --no-cache aws-cli \
+ && adduser -D -H -u 10001 -s /sbin/nologin backup
+
+COPY restore-drill.sh /usr/local/bin/restore-drill.sh
+RUN chmod 0555 /usr/local/bin/restore-drill.sh
+
+# HOME points somewhere writable because the user has no home folder and the
+# AWS CLI looks there for its cache. PGCONNECT_TIMEOUT bounds each connection
+# attempt; libpq would otherwise wait indefinitely.
+ENV HOME=/tmp \
+    PGCONNECT_TIMEOUT=15
+
+USER 10001
+
+# Replaces the base image's server entrypoint, which also clears its CMD.
+ENTRYPOINT ["/usr/local/bin/restore-drill.sh"]
