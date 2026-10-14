@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   shellcheck:
-    name: shellcheck (backup.sh)
+    name: shellcheck (backup.sh, restore-drill.sh)
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -28,15 +28,15 @@ jobs:
         with:
           persist-credentials: false
 
-      # shellcheck ships on the runner image. --shell=sh holds the script to
-      # POSIX sh, which is what Alpine's busybox runs it with.
+      # shellcheck ships on the runner image. --shell=sh holds the scripts to
+      # POSIX sh, which is what Alpine's busybox runs them with.
       - name: Run shellcheck
         run: |
           shellcheck --version
-          shellcheck --shell=sh --severity=style ops/pg-backup/backup.sh
+          shellcheck --shell=sh --severity=style ops/pg-backup/backup.sh ops/pg-backup/restore-drill.sh
 
   end-to-end:
-    name: Backup image (build, dump, upload, prune, restore)
+    name: Backup image (build, dump, upload, prune, restore, restore test)
     runs-on: ubuntu-latest
 
     services:
@@ -69,6 +69,7 @@ jobs:
 
     env:
       IMAGE: soctriage-pg-backup:ci
+      DRILL_IMAGE: soctriage-restore-drill:ci
       # For the test's own setup and checks.
       PG_URL: postgresql://soctriage@127.0.0.1:5432
       S3_URL: http://127.0.0.1:9090
@@ -99,6 +100,10 @@ jobs:
           docker run --rm --entrypoint sh "$IMAGE" -c '
             found=$(find / -xdev -name ".env" -not -path "/proc/*" 2>/dev/null)
             test -z "$found" || { echo "unexpected files:"; echo "$found"; exit 1; }'
+          # The folder now holds a second script for the restore test image.
+          docker run --rm --entrypoint sh "$IMAGE" -c '
+            test -f /usr/local/bin/backup.sh || { echo "backup.sh missing"; exit 1; }
+            test ! -e /usr/local/bin/restore-drill.sh || { echo "restore-drill.sh copied into the backup image"; exit 1; }'
           version=$(docker run --rm --entrypoint pg_dump "$IMAGE" --version)
           echo "$version"
           major=$(echo "$version" | sed -E 's/.* ([0-9]+)\..*/\1/')
@@ -318,3 +323,164 @@ jobs:
           echo "restored: $restored"
           test "$source" = "$restored" || { echo "restored data differs"; exit 1; }
           case "$restored" in "3 cases, 1 owned,"*) ;; *) echo "unexpected row counts"; exit 1 ;; esac
+
+      # ── Restore test image (Dockerfile.restore-drill) ──────────────────────
+      # The same backups, restored by restore-drill.sh into further databases
+      # on the same Postgres 18 service. The decoy .env from above is still in
+      # the folder.
+      - name: Build the restore test image
+        run: docker build --pull -f ops/pg-backup/Dockerfile.restore-drill -t "$DRILL_IMAGE" ops/pg-backup
+
+      - name: Restore test image runs as non-root, holds only its own script, and has pg_restore 18 or newer
+        run: |
+          uid=$(docker run --rm --entrypoint id "$DRILL_IMAGE" -u)
+          test "$uid" != "0" || { echo "image runs as root"; exit 1; }
+          docker run --rm --entrypoint sh "$DRILL_IMAGE" -c '
+            found=$(find / -xdev -name ".env" -not -path "/proc/*" 2>/dev/null)
+            test -z "$found" || { echo "unexpected files:"; echo "$found"; exit 1; }
+            test -f /usr/local/bin/restore-drill.sh || { echo "restore-drill.sh missing"; exit 1; }
+            test ! -e /usr/local/bin/backup.sh || { echo "backup.sh copied into the restore test image"; exit 1; }'
+          version=$(docker run --rm --entrypoint pg_restore "$DRILL_IMAGE" --version)
+          echo "$version"
+          major=$(echo "$version" | sed -E 's/.* ([0-9]+)\..*/\1/')
+          test "$major" -ge 18 || { echo "pg_restore $major cannot read a pg_dump 18 archive"; exit 1; }
+
+      # run-drill.sh starts the restore test container against database $2
+      # with the standard placeholder settings; extra docker arguments override
+      # them. Its exit status is the container's. relations.sh counts tables
+      # and views in schema public, the same thing the script's guard counts.
+      - name: Write restore test helpers
+        run: |
+          cat > "$RUNNER_TEMP/bin/run-drill.sh" <<'EOF'
+          #!/bin/sh
+          # Usage: run-drill.sh LOGFILE DATABASE [docker run arguments...]
+          log=$1; db=$2; shift 2
+          docker run --rm --network host \
+            -e AWS_ACCESS_KEY_ID=ci-access-key-id \
+            -e AWS_SECRET_ACCESS_KEY="$SECRET_MARKER" \
+            -e AWS_DEFAULT_REGION=us-east-1 \
+            -e ENDPOINT="$S3_URL" \
+            -e BUCKET="$BUCKET_NAME" \
+            -e S3_ADDRESSING_STYLE=path \
+            -e RESTORE_DATABASE_URL="postgresql://soctriage:$DB_PASSWORD_MARKER@127.0.0.1:5432/$db" \
+            "$@" "$DRILL_IMAGE" > "$log" 2>&1
+          status=$?
+          cat "$log"
+          exit $status
+          EOF
+
+          cat > "$RUNNER_TEMP/bin/relations.sh" <<'EOF'
+          #!/bin/sh
+          exec psql.sh "$1" -At -c "SELECT count(*) FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')"
+          EOF
+
+          chmod +x "$RUNNER_TEMP"/bin/*.sh
+
+      # Every key with its size and ETag, to prove the restore tests change
+      # nothing in the bucket.
+      - name: Record the bucket before the restore tests
+        run: |
+          s3.sh s3api list-objects-v2 --bucket "$BUCKET_NAME" \
+            --query 'Contents[].[Key,Size,ETag]' --output text | sort > "$RUNNER_TEMP/bucket-before.txt"
+          cat "$RUNNER_TEMP/bucket-before.txt"
+          psql.sh soctriage_ci -c "CREATE DATABASE soctriage_drill"
+
+      - name: Restore test refuses when DATABASE_URL is set, even empty, and restores nothing
+        run: |
+          i=0
+          for value in "postgresql://soctriage:$DB_PASSWORD_MARKER@127.0.0.1:5432/soctriage_ci" ""; do
+            i=$((i + 1))
+            status=0
+            run-drill.sh "dburl$i.log" soctriage_drill -e DATABASE_URL="$value" || status=$?
+            test "$status" -eq 1 || { echo "expected exit 1, got $status"; exit 1; }
+            grep -q "FAILED: DATABASE_URL is set" "dburl$i.log"
+            ! grep -qE "chosen:|download done|PASSED" "dburl$i.log" || { echo "went past the guard"; exit 1; }
+            check-log.sh "dburl$i.log"
+          done
+          test "$(relations.sh soctriage_drill)" = 0 || { echo "target changed"; exit 1; }
+
+      - name: Restore test refuses a target that is not empty, and restores nothing
+        run: |
+          psql.sh soctriage_ci -c "CREATE DATABASE soctriage_busy"
+          psql.sh soctriage_busy -c "CREATE TABLE keep_me (x int)"
+          status=0
+          run-drill.sh busy.log soctriage_busy || status=$?
+          test "$status" -eq 1 || { echo "expected exit 1, got $status"; exit 1; }
+          grep -q "FAILED: target database is not empty: 1 tables or views in schema public" busy.log
+          ! grep -qE "chosen:|download done|PASSED" busy.log || { echo "went past the guard"; exit 1; }
+          check-log.sh busy.log
+          test "$(relations.sh soctriage_busy)" = 1 || { echo "target changed"; exit 1; }
+          test "$(psql.sh soctriage_busy -At -c "SELECT to_regclass('public.cases') IS NULL")" = t \
+            || { echo "cases table was restored into a busy target"; exit 1; }
+
+      - name: Bad restore test settings fail with a clear message
+        run: |
+          expect_fail() {
+            log=$1; message=$2; shift 2
+            status=0
+            run-drill.sh "$log" soctriage_drill "$@" || status=$?
+            test "$status" -eq 1 || { echo "$log: expected exit 1, got $status"; exit 1; }
+            grep -qF -- "$message" "$log" || { echo "$log: missing message: $message"; exit 1; }
+            check-log.sh "$log"
+          }
+          expect_fail missing-target.log "missing required variable(s): RESTORE_DATABASE_URL" -e RESTORE_DATABASE_URL=
+          expect_fail bad-file.log "RESTORE_FILE must be a backup file name" -e RESTORE_FILE=../soctriage-20200101T000000Z.dump
+          expect_fail no-file.log "backup soctriage-20000101T000000Z.dump not found under soctriage/" \
+            -e RESTORE_FILE=soctriage-20000101T000000Z.dump
+          expect_fail bad-prefix.log "BACKUP_PREFIX must end with /" -e BACKUP_PREFIX=soctriage
+          expect_fail empty-prefix.log "no backups found under nothing-here/" -e BACKUP_PREFIX=nothing-here/
+          # psql's own error names the host and port. The log must not.
+          expect_fail unreachable.log "cannot reach the target database after 3 tries" \
+            -e RESTORE_DATABASE_URL="postgresql://soctriage:$DB_PASSWORD_MARKER@127.0.0.1:1/soctriage_drill"
+          test "$(relations.sh soctriage_drill)" = 0 || { echo "target changed"; exit 1; }
+
+      # /tmp is a host folder here, so the step can see that the downloaded
+      # file is gone once the container exits.
+      - name: Restore test restores the newest backup and its counts match the seeded rows
+        run: |
+          mkdir -m 1777 "$RUNNER_TEMP/drill-tmp"
+          run-drill.sh drill.log soctriage_drill -v "$RUNNER_TEMP/drill-tmp:/tmp"
+          check-log.sh drill.log
+
+          file=${SECOND_KEY#soctriage/}
+          tables=$(psql.sh soctriage_ci -At -c "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname = 'public'")
+          alembic=$(psql.sh soctriage_ci -At -c "SELECT version_num FROM alembic_version")
+          for pattern in "file: +$file\$" "file size: +[1-9][0-9]* bytes\$" "download: +[0-9]+ s\$" \
+                         "restore: +[0-9]+ s \(measured restore time\)\$" "tables restored: +$tables\$" \
+                         "cases rows: +3\$" "newest case: +[0-9TZ:-]+, not later than the backup time " \
+                         "alembic version: +$alembic\$" "PASSED: $file restored and checked\$"; do
+            grep -qE -- "$pattern" drill.log || { echo "missing log line: $pattern"; exit 1; }
+          done
+
+          # The script's mktemp folder (tmp.*) and the backup it downloaded.
+          leftover=$(find "$RUNNER_TEMP/drill-tmp" -mindepth 1 \( -name 'tmp.*' -o -name '*.dump' \))
+          test -z "$leftover" || { echo "left behind:"; echo "$leftover"; exit 1; }
+
+          query="SELECT (SELECT count(*) FROM cases) || ' cases, '
+                     || (SELECT count(*) FROM cases WHERE owner_hash IS NOT NULL) || ' owned, '
+                     || (SELECT string_agg(case_id || ':' || status || ':' || md5(coalesce(report::text, '')), ',' ORDER BY case_id) FROM cases)
+                     || ', alembic ' || (SELECT version_num FROM alembic_version)"
+          source=$(psql.sh soctriage_ci -At -c "$query")
+          restored=$(psql.sh soctriage_drill -At -c "$query")
+          echo "source:   $source"
+          echo "restored: $restored"
+          test "$source" = "$restored" || { echo "restored data differs"; exit 1; }
+
+      - name: Restore test restores a named older backup with RESTORE_FILE
+        run: |
+          psql.sh soctriage_ci -c "CREATE DATABASE soctriage_drill2"
+          file=${FIRST_KEY#soctriage/}
+          run-drill.sh named.log soctriage_drill2 -e RESTORE_FILE="$file"
+          check-log.sh named.log
+          grep -qE "file: +$file\$" named.log
+          grep -qE "cases rows: +3\$" named.log
+          grep -qE "PASSED: $file restored and checked\$" named.log
+
+      - name: Restore tests left the bucket unchanged
+        run: |
+          s3.sh s3api list-objects-v2 --bucket "$BUCKET_NAME" \
+            --query 'Contents[].[Key,Size,ETag]' --output text | sort > "$RUNNER_TEMP/bucket-after.txt"
+          diff "$RUNNER_TEMP/bucket-before.txt" "$RUNNER_TEMP/bucket-after.txt" \
+            || { echo "the bucket changed"; exit 1; }

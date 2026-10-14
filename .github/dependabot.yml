@@ -102,9 +102,12 @@ updates:
       - dependency-name: "*python"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
-  # ── Backup job Docker base image (ops/pg-backup/Dockerfile) ───────────────
+  # ── Backup job Docker base images (ops/pg-backup) ─────────────────────────
   # Same reason as the backend image: the digest pin goes stale as Alpine and
-  # Postgres ship fixes, and this proposes the new digest for 18-alpine. The
+  # Postgres ship fixes, and this proposes the new digest for 18-alpine. One
+  # entry covers both Dockerfile and Dockerfile.restore-drill: Dependabot's
+  # docker updater reads every file in the folder whose name contains
+  # "dockerfile" (any case), so the two pins move together in one PR. The
   # major is held at 18, the production server's major. pg_dump must be at
   # least the server's major, so moving it is a planned change made when the
   # Railway Postgres moves, not a bot bump. Named docker/library/postgres on
