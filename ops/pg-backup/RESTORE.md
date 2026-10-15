@@ -159,6 +159,8 @@ the test is done (step 6).
    - `RESTORE_DATABASE_URL` = `${{restore-scratch.DATABASE_URL}}`
    - Never add `DATABASE_URL`. If it is present at all, even empty, the
      script stops before doing anything.
+   - Do not copy `HEARTBEAT_URL` from pg-backup. It belongs to the nightly
+     backup only (see [ALERTING.md](ALERTING.md)).
 4. **Deploy** and wait for the deployment to finish. The container exits on
    its own, so the deployment ends as completed or failed rather than staying
    active.

@@ -11,10 +11,17 @@
 # Optional: BACKUP_PREFIX        folder inside the bucket   (default soctriage/)
 #           RETENTION_DAYS       days a backup is kept      (default 30)
 #           S3_ADDRESSING_STYLE  virtual or path            (default virtual)
+#           HEARTBEAT_URL        healthchecks.io ping URL   (default unset: no pings)
 #
 # Railway buckets use virtual-hosted style URLs; buckets created before that
 # change, and most local S3 stand-ins, need path. The bucket's Credentials tab
 # says which one applies.
+#
+# HEARTBEAT_URL turns on a dead man's switch: the run pings <url>/start once
+# the settings are checked, <url> after "finished:", and <url>/<exit status>
+# on any other exit, so a missed or failed night sends an alert. The URL must
+# be https. A ping that cannot get through is logged and never fails the
+# backup. See ALERTING.md.
 #
 # The log never shows a value from the environment, a URL or a host. Errors
 # from pg_dump and the AWS CLI go through redact() first, because both put the
@@ -30,6 +37,63 @@ fail() {
   log "FAILED: $*"
   exit 1
 }
+
+# ── Heartbeat ────────────────────────────────────────────────────────────────
+
+# Checked before anything else, so that a failure in the settings check below
+# is reported too. Only characters a healthchecks.io ping URL uses are
+# accepted, which also rules out a query string the suffix would land after.
+# HEARTBEAT_ALLOW_HTTP=1 lets the CI test point at a local plain-http
+# listener; nothing in the image sets it.
+heartbeat=""
+heartbeat_proto="=https"
+if [ -n "${HEARTBEAT_URL:-}" ]; then
+  case $HEARTBEAT_URL in
+    *[!A-Za-z0-9._~:/-]*) ;;
+    https://?*) heartbeat=${HEARTBEAT_URL%/} ;;
+    http://?*)
+      if [ "${HEARTBEAT_ALLOW_HTTP:-}" = 1 ]; then
+        heartbeat=${HEARTBEAT_URL%/}
+        heartbeat_proto="=http,https"
+      fi ;;
+  esac
+  [ -n "$heartbeat" ] || log "heartbeat: HEARTBEAT_URL is not an https URL, ignored"
+fi
+
+# Usage: ping LABEL [SUFFIX [BODY]]. Sends <url><SUFFIX>, as a POST with BODY
+# when one is given. Never fails: an error is logged by LABEL only, and curl's
+# own message is dropped because it names the host.
+ping() {
+  [ -n "$heartbeat" ] || return 0
+  label=$1
+  url=$heartbeat${2:-}
+  if [ -n "${3:-}" ]; then set -- --data-raw "$3"; else set --; fi
+  if curl --silent --show-error --fail --max-time 10 --retry 3 --retry-delay 5 \
+       --proto "$heartbeat_proto" --output /dev/null "$@" -- "$url" 2>/dev/null; then
+    log "heartbeat: sent ($label)"
+  else
+    log "heartbeat: could not reach the check ($label)"
+  fi
+  url=""
+}
+
+# Every exit other than a success pings /<exit status> once, with the name of
+# the step that was running as the body and nothing else. The temporary
+# folder is removed here too, once it exists.
+step="settings"
+workdir=""
+fail_pinged=""
+on_exit() {
+  status=$?
+  [ -z "$workdir" ] || rm -rf "$workdir"
+  if [ "$status" -ne 0 ] && [ -z "$fail_pinged" ]; then
+    fail_pinged=1
+    ping fail "/$status" "failed step: $step"
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
+trap 'step="$step (stopped by a signal)"; exit 1' HUP INT TERM
 
 # Prints a tool's captured error output with URLs, quoted strings, anything in
 # parentheses and IPv4 addresses removed. That is where pg_dump and the AWS CLI
@@ -80,9 +144,10 @@ case $ADDRESSING_STYLE in
   *) fail "S3_ADDRESSING_STYLE must be virtual or path" ;;
 esac
 
+step="setup"
+ping start /start
+
 workdir=$(mktemp -d)
-trap 'rm -rf "$workdir"' EXIT
-trap 'exit 1' HUP INT TERM
 
 # The addressing style can only be set in an AWS config file, so write one
 # for this run. Credentials and region still come from the AWS_* variables.
@@ -102,6 +167,7 @@ log "start: backup $file (prefix $PREFIX, retention $RETENTION_DAYS days)"
 # Three tries, five seconds apart, for a private network or a database that is
 # a moment slow to answer. PGCONNECT_TIMEOUT (set in the Dockerfile) bounds
 # each try.
+step="dump"
 attempt=1
 until pg_dump --format=custom --no-owner --file="$dump" --dbname="$DATABASE_URL" 2>"$err"; do
   if [ "$attempt" -ge 3 ]; then
@@ -115,6 +181,8 @@ done
 
 size=$(wc -c < "$dump" | tr -d ' ')
 [ "$size" -gt 0 ] || fail "pg_dump wrote an empty file"
+
+step="archive check"
 
 # The archive must open and must hold the app's table, with its rows, and the
 # migration marker. An empty or wrong database would otherwise back up "fine".
@@ -133,11 +201,15 @@ log "dump size: $size bytes, archive valid, lists cases and alembic_version"
 
 # ── Upload ───────────────────────────────────────────────────────────────────
 
+step="upload"
+
 if ! aws s3 cp "$dump" "s3://$BUCKET/$key" --endpoint-url "$ENDPOINT" \
       --only-show-errors --no-progress 2>"$err"; then
   redact "$err"
   fail "upload failed"
 fi
+
+step="upload check"
 
 if ! remote_size=$(aws s3api head-object --bucket "$BUCKET" --key "$key" \
       --endpoint-url "$ENDPOINT" --query ContentLength --output text 2>"$err"); then
@@ -156,6 +228,8 @@ log "upload done: $key ($remote_size bytes, size matches)"
 # <prefix>soctriage-YYYYMMDDTHHMMSSZ.dump, directly in the prefix. Anything
 # else in the bucket, inside the prefix or not, is never touched. The newest
 # backup, and the one just uploaded, are always kept whatever their age.
+
+step="prune"
 
 if ! aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$PREFIX" \
       --endpoint-url "$ENDPOINT" --query 'Contents[].[Key]' --output text \
@@ -205,3 +279,4 @@ done < "$workdir/sorted"
 
 log "objects pruned: $pruned older than $RETENTION_DAYS days, $kept backups kept"
 log "finished: $key"
+ping success

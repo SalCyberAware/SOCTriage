@@ -18,7 +18,9 @@
 FROM public.ecr.aws/docker/library/postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
 
 # AWS CLI v2 from Alpine's own packages, as Railway's backup guide does.
-RUN apk add --no-cache aws-cli \
+# curl sends the heartbeat pings (see ALERTING.md); the base image has
+# libcurl but not the curl command.
+RUN apk add --no-cache aws-cli curl \
  && adduser -D -H -u 10001 -s /sbin/nologin backup
 
 COPY backup.sh /usr/local/bin/backup.sh

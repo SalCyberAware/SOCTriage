@@ -137,6 +137,11 @@ jobs:
           major=$(echo "$version" | sed -E 's/.* ([0-9]+)\..*/\1/')
           test "$major" -ge 18 || { echo "pg_dump $major cannot dump a Postgres 18 server"; exit 1; }
           docker run --rm --entrypoint aws "$IMAGE" --version
+          docker run --rm --entrypoint curl "$IMAGE" --version | head -n 1
+          # The plain-http switch is for the heartbeat test below only.
+          if docker image inspect "$IMAGE" --format '{{json .Config.Env}}' | grep -q HEARTBEAT; then
+            echo "the image sets a HEARTBEAT variable"; exit 1
+          fi
 
       # Helpers the steps below share. run-backup.sh starts the backup
       # container with the standard placeholder settings; extra docker
@@ -512,3 +517,155 @@ jobs:
             --query 'Contents[].[Key,Size,ETag]' --output text | sort > "$RUNNER_TEMP/bucket-after.txt"
           diff "$RUNNER_TEMP/bucket-before.txt" "$RUNNER_TEMP/bucket-after.txt" \
             || { echo "the bucket changed"; exit 1; }
+
+      # ── Heartbeat (HEARTBEAT_URL) ──────────────────────────────────────────
+      # A local listener stands in for healthchecks.io and records each request
+      # as "METHOD PATH BODY". HEARTBEAT_ALLOW_HTTP=1 lets the script reach it
+      # over plain http; the image never sets that. These runs come last
+      # because the successful ones add backups the steps above count.
+      # hb-start.sh starts the listener and records its PID, hb-stop.sh stops
+      # that PID, and hb-expect.sh fails unless the recorded requests are
+      # exactly its arguments, in order.
+      - name: Write heartbeat test helpers
+        run: |
+          cat > "$RUNNER_TEMP/hb-listener.py" <<'EOF'
+          import http.server, sys
+
+          port, out = int(sys.argv[1]), sys.argv[2]
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def record(self):
+                  n = int(self.headers.get("Content-Length") or 0)
+                  body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+                  with open(out, "a", encoding="utf-8", newline="\n") as f:
+                      f.write(f"{self.command} {self.path} {body}".rstrip() + "\n")
+                  self.send_response(200)
+                  self.send_header("Content-Length", "2")
+                  self.end_headers()
+                  self.wfile.write(b"OK")
+
+              do_GET = do_POST = do_HEAD = record
+
+              def log_message(self, *args):
+                  pass
+
+          http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+          EOF
+
+          cat > "$RUNNER_TEMP/bin/hb-start.sh" <<'EOF'
+          #!/bin/sh
+          requests="$RUNNER_TEMP/hb-requests.txt"
+          : > "$requests"
+          python3 -I "$RUNNER_TEMP/hb-listener.py" "$HB_PORT" "$requests" > /dev/null 2>&1 &
+          echo $! > "$RUNNER_TEMP/hb.pid"
+          for _ in $(seq 1 20); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:$HB_PORT/ready"; then
+              : > "$requests"; exit 0
+            fi
+            sleep 0.5
+          done
+          echo "heartbeat listener did not start"; exit 1
+          EOF
+
+          cat > "$RUNNER_TEMP/bin/hb-stop.sh" <<'EOF'
+          #!/bin/sh
+          pidfile="$RUNNER_TEMP/hb.pid"
+          [ -f "$pidfile" ] || exit 0
+          kill "$(cat "$pidfile")" 2>/dev/null || true
+          rm -f "$pidfile"
+          EOF
+
+          cat > "$RUNNER_TEMP/bin/hb-expect.sh" <<'EOF'
+          #!/bin/sh
+          requests="$RUNNER_TEMP/hb-requests.txt"
+          if [ "$#" -eq 0 ]; then : > "$RUNNER_TEMP/hb-expected.txt"; else printf '%s\n' "$@" > "$RUNNER_TEMP/hb-expected.txt"; fi
+          echo "requests seen:"; cat "$requests"
+          diff "$RUNNER_TEMP/hb-expected.txt" "$requests" || { echo "unexpected heartbeat requests"; exit 1; }
+          EOF
+
+          # check-log.sh already rejects "://" and 127.0.0.1; this also rejects
+          # the path, which stands for the secret part of a real ping URL.
+          cat > "$RUNNER_TEMP/bin/hb-check-log.sh" <<'EOF'
+          #!/bin/sh
+          check-log.sh "$1"
+          if grep -qF -- ci-ping-key "$1"; then echo "log shows the ping URL"; exit 1; fi
+          EOF
+
+          chmod +x "$RUNNER_TEMP"/bin/*.sh
+
+      - name: Heartbeat off by default, no request and no heartbeat line
+        env:
+          HB_PORT: '18099'
+        run: |
+          for f in first.log second.log; do
+            ! grep -q heartbeat "$f" || { echo "$f has a heartbeat line"; exit 1; }
+          done
+          hb-start.sh
+          trap hb-stop.sh EXIT
+          run-backup.sh hb-unset.log
+          ! grep -q heartbeat hb-unset.log || { echo "heartbeat line without HEARTBEAT_URL"; exit 1; }
+          hb-expect.sh
+          check-log.sh hb-unset.log
+
+      - name: Heartbeat on a successful run sends start, then success
+        env:
+          HB_PORT: '18099'
+          HB_URL: http://127.0.0.1:18099/ci-ping-key-must-not-be-logged/soctriage-backup
+        run: |
+          hb-start.sh
+          trap hb-stop.sh EXIT
+          run-backup.sh hb-ok.log -e HEARTBEAT_URL="$HB_URL" -e HEARTBEAT_ALLOW_HTTP=1
+          hb-expect.sh "GET /ci-ping-key-must-not-be-logged/soctriage-backup/start" \
+                       "GET /ci-ping-key-must-not-be-logged/soctriage-backup"
+          grep -qF "heartbeat: sent (start)" hb-ok.log
+          grep -qF "heartbeat: sent (success)" hb-ok.log
+          grep -qF "finished: " hb-ok.log
+          hb-check-log.sh hb-ok.log
+
+      - name: Heartbeat on a failed run sends start, then the exit status with the step name
+        env:
+          HB_PORT: '18099'
+          HB_URL: http://127.0.0.1:18099/ci-ping-key-must-not-be-logged/soctriage-backup
+        run: |
+          hb-start.sh
+          trap hb-stop.sh EXIT
+          status=0
+          run-backup.sh hb-fail.log -e HEARTBEAT_URL="$HB_URL" -e HEARTBEAT_ALLOW_HTTP=1 \
+            -e BUCKET=no-such-bucket || status=$?
+          test "$status" -eq 1 || { echo "expected exit 1, got $status"; exit 1; }
+          grep -qF "FAILED: upload failed" hb-fail.log
+          hb-expect.sh "GET /ci-ping-key-must-not-be-logged/soctriage-backup/start" \
+                       "POST /ci-ping-key-must-not-be-logged/soctriage-backup/1 failed step: upload"
+          hb-check-log.sh hb-fail.log
+
+          # A settings failure comes before /start and is still reported.
+          : > "$RUNNER_TEMP/hb-requests.txt"
+          status=0
+          run-backup.sh hb-settings.log -e HEARTBEAT_URL="$HB_URL" -e HEARTBEAT_ALLOW_HTTP=1 \
+            -e ENDPOINT= || status=$?
+          test "$status" -eq 1 || { echo "expected exit 1, got $status"; exit 1; }
+          hb-expect.sh "POST /ci-ping-key-must-not-be-logged/soctriage-backup/1 failed step: settings"
+          hb-check-log.sh hb-settings.log
+
+      - name: Heartbeat refuses a plain-http URL unless the test switch is set
+        env:
+          HB_PORT: '18099'
+          HB_URL: http://127.0.0.1:18099/ci-ping-key-must-not-be-logged/soctriage-backup
+        run: |
+          hb-start.sh
+          trap hb-stop.sh EXIT
+          run-backup.sh hb-http.log -e HEARTBEAT_URL="$HB_URL"
+          test "$(grep -c "heartbeat: HEARTBEAT_URL is not an https URL, ignored" hb-http.log)" -eq 1
+          hb-expect.sh
+          hb-check-log.sh hb-http.log
+
+      - name: Heartbeat that cannot get through never fails the backup
+        env:
+          HB_URL: http://127.0.0.1:18099/ci-ping-key-must-not-be-logged/soctriage-backup
+        run: |
+          # No listener is running on the port.
+          run-backup.sh hb-down.log -e HEARTBEAT_URL="$HB_URL" -e HEARTBEAT_ALLOW_HTTP=1
+          grep -qF "heartbeat: could not reach the check (start)" hb-down.log
+          grep -qF "heartbeat: could not reach the check (success)" hb-down.log
+          grep -qF "finished: " hb-down.log
+          hb-check-log.sh hb-down.log
