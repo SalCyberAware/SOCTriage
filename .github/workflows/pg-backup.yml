@@ -90,8 +90,36 @@ jobs:
       - name: Plant a decoy .env file
         run: echo "DECOY=1" > ops/pg-backup/.env
 
+      # public.ecr.aws answers anonymous pulls from GitHub runners with 429
+      # "Data limit exceeded" now and then. Pull every digest-pinned base image
+      # here with backoff (waits of 20, 40, 80 and 160 s), so the build below
+      # finds it locally and never asks the registry itself. The FROM lines are
+      # pinned by digest, so building from the local copy gives the same image.
+      - name: Pull the base image (retries on registry rate limits)
+        env:
+          DOCKERFILES: ops/pg-backup/Dockerfile ops/pg-backup/Dockerfile.restore-drill
+        run: |
+          refs=$(echo "$DOCKERFILES" | xargs grep -hiE '^[[:space:]]*FROM[[:space:]]' | grep -oE '[^[:space:]]+@sha256:[0-9a-f]{64}' | sort -u) || true
+          test -n "$refs" || { echo "no digest-pinned FROM line in $DOCKERFILES"; exit 1; }
+          pull_err="$RUNNER_TEMP/base-image-pull.err"
+          for ref in $refs; do
+            echo "Pulling ${ref%%@*}"
+            attempt=0
+            for wait_s in 20 40 80 160 last; do
+              attempt=$((attempt + 1))
+              status=0
+              docker pull --quiet "$ref" >/dev/null 2>"$pull_err" || status=$?
+              echo "attempt $attempt: exit $status"
+              if [ "$status" -eq 0 ]; then continue 2; fi
+              if [ "$wait_s" != last ]; then sleep "$wait_s"; fi
+            done
+            echo "Every attempt failed. Last 5 lines of the last error:"
+            tail -n 5 "$pull_err"
+            exit 1
+          done
+
       - name: Build the image
-        run: docker build --pull -t "$IMAGE" ops/pg-backup
+        run: docker build -t "$IMAGE" ops/pg-backup
 
       - name: Image runs as non-root, holds no env file, and has pg_dump 18 or newer
         run: |
@@ -329,7 +357,7 @@ jobs:
       # on the same Postgres 18 service. The decoy .env from above is still in
       # the folder.
       - name: Build the restore test image
-        run: docker build --pull -f ops/pg-backup/Dockerfile.restore-drill -t "$DRILL_IMAGE" ops/pg-backup
+        run: docker build -f ops/pg-backup/Dockerfile.restore-drill -t "$DRILL_IMAGE" ops/pg-backup
 
       - name: Restore test image runs as non-root, holds only its own script, and has pg_restore 18 or newer
         run: |
