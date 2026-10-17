@@ -61,7 +61,7 @@ jobs:
         # Adobe S3Mock 5.2.3, an S3-compatible stand-in for the bucket. MinIO
         # no longer publishes a container image. S3Mock accepts any
         # credentials and supports path-style URLs only.
-        image: adobe/s3mock@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92
+        image: adobe/s3mock:5.2.3@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92
         env:
           COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: soctriage-backups
         ports:

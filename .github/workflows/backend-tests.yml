@@ -104,8 +104,9 @@ jobs:
     # head -- and then runs the whole suite against that schema.
     services:
       postgres:
-        # Keep the major version in step with the Railway Postgres service.
-        image: postgres:16
+        # Postgres 18, the production major. Pinned by digest, the same pin as
+        # pg-backup.yml; from the public mirror the backend image is built from.
+        image: public.ecr.aws/docker/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
         env:
           POSTGRES_USER: soctriage
           POSTGRES_DB: soctriage_ci
@@ -176,8 +177,9 @@ jobs:
 
     services:
       postgres:
-        # Keep the major version in step with the Railway Postgres service.
-        image: postgres:16
+        # Postgres 18, the production major. Pinned by digest, the same pin as
+        # pg-backup.yml; from the public mirror the backend image is built from.
+        image: public.ecr.aws/docker/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
         env:
           POSTGRES_USER: soctriage
           POSTGRES_DB: soctriage_ci

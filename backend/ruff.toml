@@ -4,8 +4,8 @@
 # E/F/I/N/W/UP rule set) so the two repositories lint the same way.
 #
 # A standalone ruff.toml rather than a [tool.ruff] table in a pyproject.toml:
-# this backend is deployed by Railway from requirements.txt + Procfile and is
-# not an installable Python package. Adding a pyproject.toml would invite the
+# this backend is deployed by Railway from backend/Dockerfile and is not an
+# installable Python package. Adding a pyproject.toml would invite the
 # builder to treat the directory as one.
 line-length = 120
 target-version = "py311"

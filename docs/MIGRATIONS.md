@@ -99,7 +99,7 @@ database (`migrations-postgres` in
 ## Running more than one process
 
 Migrations run inside application startup, so two processes starting at the
-same moment would both try to upgrade. Today the Procfile starts a single
+same moment would both try to upgrade. Today the container starts a single
 uvicorn process, so this cannot happen. Before scaling to several replicas or
 workers, move the upgrade to a one-off release step (`alembic upgrade head`)
 or guard it with a Postgres advisory lock.

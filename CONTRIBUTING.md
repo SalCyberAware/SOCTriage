@@ -5,6 +5,7 @@ SOCTriage is an AI-powered SOC alert triage assistant. Paste an IOC, get enriche
 ## Prerequisites
 
 - **Python 3.11+** (CI pins 3.11.9, see [`backend/runtime.txt`](backend/runtime.txt))
+  - `runtime.txt` is kept for Dependabot and CI version sync. The deployed Python comes from the pinned base image in `backend/Dockerfile`.
 - **Node.js 20+** and **npm**, for the frontend
 - **PostgreSQL 16+** *(optional locally)*. The backend falls back to SQLite if `DATABASE_URL` is unset; Railway provides Postgres in production
 - An **Anthropic API key** for the AI incident-report generation
