@@ -654,8 +654,7 @@ SOCTriage/
 │   ├── .env.example               # Annotated list of every variable
 │   ├── Dockerfile                 # The image Railway builds and runs
 │   ├── .dockerignore              # Allowlist of what goes into the image
-│   ├── Procfile                   # Start command for the previous Railpack build
-│   └── runtime.txt                # Python 3.11.9
+│   └── runtime.txt                # Python 3.11.9, for Dependabot and CI version sync
 └── frontend/
     ├── src/
     │   ├── App.jsx                # React UI (single file)

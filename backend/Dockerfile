@@ -53,7 +53,7 @@ COPY . .
 
 USER 10001
 
-# The same uvicorn command as the Procfile. A shell so ${PORT} expands
+# Start a single uvicorn process for main:app. A shell so ${PORT} expands
 # (Railway sets it; 8080 matches the public domain's target port), and exec so
 # uvicorn replaces the shell as PID 1 and receives SIGTERM, which it handles
 # with a graceful shutdown. No proxy header flags are added: the rate limiter
