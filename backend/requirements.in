@@ -1,7 +1,7 @@
 # Production dependency RANGES, the source of the lock. Edit this file, then
 # regenerate backend/requirements.txt (the hashed lock Railway and CI install):
 #   uv pip compile requirements.in --universal --python-version 3.11 --generate-hashes -o requirements.txt
-fastapi==0.143.0
+fastapi==0.162.0
 uvicorn==0.54.0
 # Used directly by services/enrichment.py for the ThreatScan calls, and by
 # starlette's TestClient (which caps it below 0.29). NOT the Anthropic SDK's
@@ -9,13 +9,13 @@ uvicorn==0.54.0
 httpx==0.28.1
 python-dotenv==1.2.4
 anthropic==1.13.0
-pydantic==2.14.0
+pydantic==2.14.1
 # Held on the 2.0 line. SQLAlchemy 2.1 changed the default driver for a bare
 # postgresql:// URL from psycopg2 to psycopg (v3), which is not installed, and
 # picking up 2.1 through this once-unpinned line took production down.
 # database.py now names psycopg2 in the URL explicitly; moving to 2.1 is a
 # deliberate upgrade to read the migration notes for, not a range bump.
-sqlalchemy>=2.0.30,<2.1
+sqlalchemy>=2.0.55,<2.1
 psycopg2-binary>=2.9.13
 # Schema migrations. See docs/MIGRATIONS.md.
-alembic==1.20.0
+alembic==1.20.1
