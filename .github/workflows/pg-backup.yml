@@ -41,9 +41,11 @@ jobs:
 
     services:
       postgres:
-        # Postgres 18, the production major. Pinned by digest; from the same
-        # public mirror the image itself is built from.
-        image: public.ecr.aws/docker/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        # Postgres 18, the production major. Pinned by digest, the same pin as
+        # backend-tests.yml. Pulled from the GHCR mirror (docs in PromptShield's
+        # docs/BASE_IMAGE_MIRROR.md) because public.ecr.aws answers runner pulls
+        # with 429, and service containers start before any step can retry.
+        image: ghcr.io/salcyberaware/mirror/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 # mirror of public.ecr.aws/docker/library/postgres:18
         env:
           POSTGRES_USER: soctriage
           POSTGRES_DB: soctriage_ci
@@ -60,8 +62,9 @@ jobs:
       s3:
         # Adobe S3Mock 5.2.3, an S3-compatible stand-in for the bucket. MinIO
         # no longer publishes a container image. S3Mock accepts any
-        # credentials and supports path-style URLs only.
-        image: adobe/s3mock:5.2.3@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92
+        # credentials and supports path-style URLs only. Pulled from the GHCR
+        # mirror, as the Postgres service is.
+        image: ghcr.io/salcyberaware/mirror/adobe/s3mock:5.2.3@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92 # mirror of adobe/s3mock:5.2.3
         env:
           COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: soctriage-backups
         ports:
@@ -90,36 +93,78 @@ jobs:
       - name: Plant a decoy .env file
         run: echo "DECOY=1" > ops/pg-backup/.env
 
-      # public.ecr.aws answers anonymous pulls from GitHub runners with 429
-      # "Data limit exceeded" now and then. Pull every digest-pinned base image
-      # here with backoff (waits of 20, 40, 80 and 160 s), so the build below
-      # finds it locally and never asks the registry itself. The FROM lines are
-      # pinned by digest, so building from the local copy gives the same image.
-      - name: Pull the base image (retries on registry rate limits)
+      # CI takes the base image from the GHCR mirror that PromptShield's
+      # .github/workflows/mirror-base-images.yml keeps, because public.ecr.aws
+      # answers anonymous pulls from GitHub runners with 429 "Data limit
+      # exceeded" now and then. The Dockerfile keeps its public.ecr.aws FROM
+      # lines, so Railway and Dependabot see no change. Pointing public.ecr.aws
+      # at 0.0.0.0 for the rest of this job makes the build fail instead of
+      # quietly falling back to it.
+      - name: Block public.ecr.aws for the rest of the job
+        run: |
+          echo "0.0.0.0 public.ecr.aws" | sudo tee -a /etc/hosts >/dev/null
+          if curl -s -o /dev/null --max-time 10 https://public.ecr.aws/v2/; then
+            echo "public.ecr.aws is still reachable"; exit 1
+          fi
+          echo "public.ecr.aws blocked"
+
+      # For each digest-pinned FROM ref, pull the mirror copy of the same digest
+      # with backoff (waits of 20, 40, 80 and 160 s, now for GHCR hiccups),
+      # check that the image pulled has exactly the Dockerfile's digest, and
+      # record a --build-context that makes the build use it in place of the
+      # FROM ref. The mirror path is the ref without public.ecr.aws/docker/library/.
+      - name: Pull the base image from the GHCR mirror (with retries)
         env:
           DOCKERFILES: ops/pg-backup/Dockerfile ops/pg-backup/Dockerfile.restore-drill
+          MIRROR: ghcr.io/salcyberaware/mirror
+          UPSTREAM: public.ecr.aws/docker/library/
         run: |
           refs=$(echo "$DOCKERFILES" | xargs grep -hiE '^[[:space:]]*FROM[[:space:]]' | grep -oE '[^[:space:]]+@sha256:[0-9a-f]{64}' | sort -u) || true
           test -n "$refs" || { echo "no digest-pinned FROM line in $DOCKERFILES"; exit 1; }
+          contexts="$RUNNER_TEMP/base-image-contexts"
+          : > "$contexts"
           pull_err="$RUNNER_TEMP/base-image-pull.err"
           for ref in $refs; do
-            echo "Pulling ${ref%%@*}"
+            name_tag=${ref%%@*}
+            pinned=${ref#*@}
+            case $name_tag in
+              "$UPSTREAM"*) ;;
+              *) echo "$name_tag is not under $UPSTREAM, so it has no mirror path"; exit 1 ;;
+            esac
+            path=${name_tag#"$UPSTREAM"}
+            mirror_ref="$MIRROR/$path@$pinned"
+            echo "Pulling $MIRROR/$path at $pinned (Dockerfile pin)"
             attempt=0
+            pulled=0
             for wait_s in 20 40 80 160 last; do
               attempt=$((attempt + 1))
               status=0
-              docker pull --quiet "$ref" >/dev/null 2>"$pull_err" || status=$?
+              docker pull --quiet "$mirror_ref" >/dev/null 2>"$pull_err" || status=$?
               echo "attempt $attempt: exit $status"
-              if [ "$status" -eq 0 ]; then continue 2; fi
+              if [ "$status" -eq 0 ]; then pulled=1; break; fi
               if [ "$wait_s" != last ]; then sleep "$wait_s"; fi
             done
-            echo "Every attempt failed. Last 5 lines of the last error:"
-            tail -n 5 "$pull_err"
-            exit 1
+            if [ "$pulled" -ne 1 ]; then
+              echo "Every attempt failed. Last 5 lines of the last error:"
+              tail -n 5 "$pull_err"
+              exit 1
+            fi
+            got=$(docker image inspect --format '{{join .RepoDigests "\n"}}' "$mirror_ref" \
+              | grep -E "^$MIRROR/${path%%:*}@sha256:[0-9a-f]{64}$" | sed 's/.*@//' | sort -u)
+            if [ "$got" != "$pinned" ]; then
+              echo "digest mismatch for $path: Dockerfile pins $pinned, mirror image has ${got:-none}"
+              exit 1
+            fi
+            echo "digest match: $MIRROR/${path%%:*}@$got equals the Dockerfile pin"
+            printf '%s\n' --build-context "$ref=docker-image://$mirror_ref" >> "$contexts"
           done
 
+      # Plain progress, so the log names the registry each base image came from.
       - name: Build the image
-        run: docker build -t "$IMAGE" ops/pg-backup
+        run: |
+          mapfile -t contexts < "$RUNNER_TEMP/base-image-contexts"
+          test "${#contexts[@]}" -gt 0 || { echo "no base image context recorded"; exit 1; }
+          docker build --progress=plain "${contexts[@]}" -t "$IMAGE" ops/pg-backup
 
       - name: Image runs as non-root, holds no env file, and has pg_dump 18 or newer
         run: |
@@ -362,7 +407,10 @@ jobs:
       # on the same Postgres 18 service. The decoy .env from above is still in
       # the folder.
       - name: Build the restore test image
-        run: docker build -f ops/pg-backup/Dockerfile.restore-drill -t "$DRILL_IMAGE" ops/pg-backup
+        run: |
+          mapfile -t contexts < "$RUNNER_TEMP/base-image-contexts"
+          test "${#contexts[@]}" -gt 0 || { echo "no base image context recorded"; exit 1; }
+          docker build --progress=plain "${contexts[@]}" -f ops/pg-backup/Dockerfile.restore-drill -t "$DRILL_IMAGE" ops/pg-backup
 
       - name: Restore test image runs as non-root, holds only its own script, and has pg_restore 18 or newer
         run: |
