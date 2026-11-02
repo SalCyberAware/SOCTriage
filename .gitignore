@@ -210,3 +210,8 @@ __marimo__/
 *.db
 
 .claude/
+
+# dotenv files: ignore every .env variant, keep example templates trackable
+.env
+.env.*
+!.env.example
