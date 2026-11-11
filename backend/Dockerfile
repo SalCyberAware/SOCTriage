@@ -16,7 +16,7 @@
 # can only supply that exact image or the build fails.
 
 # ── Build stage ─────────────────────────────────────────────────────────────
-FROM public.ecr.aws/docker/library/python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce AS build
+FROM public.ecr.aws/docker/library/python:3.11-slim-trixie@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS build
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -29,7 +29,7 @@ RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip check
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
-FROM public.ecr.aws/docker/library/python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
+FROM public.ecr.aws/docker/library/python:3.11-slim-trixie@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
